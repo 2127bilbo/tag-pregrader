@@ -1,0 +1,995 @@
+import { useState, useRef, useCallback, useEffect } from "react";
+
+/* ═══════════════════════════════════════════
+   TAG PRE-GRADER v2.0
+   DINGS-Based Scoring Engine
+   Calibrated against 6 real TAG DIG reports
+   ═══════════════════════════════════════════ */
+
+const GRADES = [
+  { label:"Pristine 10",min:990,max:1000,color:"#00ff88",bg:"rgba(0,255,136,0.10)" },
+  { label:"Gem Mint 10",min:950,max:989,color:"#00dd77",bg:"rgba(0,221,119,0.08)" },
+  { label:"Mint 9",min:900,max:949,color:"#66dd44",bg:"rgba(102,221,68,0.08)" },
+  { label:"NM-MT+ 8.5",min:850,max:899,color:"#ccbb00",bg:"rgba(204,187,0,0.08)" },
+  { label:"NM-MT 8",min:800,max:849,color:"#ff9900",bg:"rgba(255,153,0,0.08)" },
+  { label:"NM 7",min:700,max:799,color:"#ff6633",bg:"rgba(255,102,51,0.08)" },
+  { label:"EX-MT 6",min:600,max:699,color:"#ff4444",bg:"rgba(255,68,68,0.08)" },
+  { label:"EX 5",min:500,max:599,color:"#cc2222",bg:"rgba(204,34,34,0.08)" },
+  { label:"Below 5",min:0,max:499,color:"#991111",bg:"rgba(153,17,17,0.08)" },
+];
+const getGrade = s => { for (const g of GRADES) if (s>=g.min&&s<=g.max) return g; return GRADES[GRADES.length-1]; };
+const mono="'JetBrains Mono','SF Mono',monospace", sans="'Inter',-apple-system,sans-serif";
+
+/* ═══════════════════════════════════════════
+   IMAGE UTILITIES
+   ═══════════════════════════════════════════ */
+function loadImg(src,mx=1400){return new Promise(r=>{const img=new Image();img.crossOrigin="anonymous";img.onload=()=>{let w=img.width,h=img.height;if(Math.max(w,h)>mx){const s=mx/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}const c=document.createElement("canvas");c.width=w;c.height=h;const ctx=c.getContext("2d",{willReadFrequently:true});ctx.drawImage(img,0,0,w,h);r({canvas:c,ctx,w,h,data:ctx.getImageData(0,0,w,h)});};img.src=src;});}
+const PX=(d,w,x,y)=>{const i=(y*w+x)*4;return[d[i],d[i+1],d[i+2]];};
+const LUM=(r,g,b)=>.299*r+.587*g+.114*b;
+
+/* ═══════════════════════════════════════════
+   CARD DETECTION (improved thresholds)
+   ═══════════════════════════════════════════ */
+function findBounds(d,w,h){
+  // Multi-threshold scan for robustness with phone photos
+  const thresholds = [15, 25, 40, 60];
+  let best = null, bestArea = 0;
+  
+  for (const t of thresholds) {
+    let l=0, r=w-1, tp=0, b=h-1;
+    const rowVar = (y,x1,x2) => { let s=0,q=0,n=0; const st=Math.max(1,~~((x2-x1)/60)); for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,Math.min(w-1,x),y));s+=v;q+=v*v;n++;} return n>0?q/n-(s/n)**2:0; };
+    const colVar = (x,y1,y2) => { let s=0,q=0,n=0; const st=Math.max(1,~~((y2-y1)/60)); for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,x,Math.min(h-1,y)));s+=v;q+=v*v;n++;} return n>0?q/n-(s/n)**2:0; };
+    
+    for(let x=0;x<w*.35;x++) if(colVar(x,~~(h*.15),~~(h*.85))>t){l=x;break;}
+    for(let x=w-1;x>w*.65;x--) if(colVar(x,~~(h*.15),~~(h*.85))>t){r=x;break;}
+    for(let y=0;y<h*.35;y++) if(rowVar(y,~~(w*.15),~~(w*.85))>t){tp=y;break;}
+    for(let y=h-1;y>h*.65;y--) if(rowVar(y,~~(w*.15),~~(w*.85))>t){b=y;break;}
+    
+    const area = (r-l)*(b-tp);
+    if (area > bestArea && (r-l) > w*0.2 && (b-tp) > h*0.2) {
+      bestArea = area;
+      best = { left:l, right:r, top:tp, bottom:b, cardW:r-l, cardH:b-tp };
+    }
+  }
+  return best || { left:0, right:w-1, top:0, bottom:h-1, cardW:w-1, cardH:h-1 };
+}
+
+/* ═══════════════════════════════════════════
+   CENTERING ANALYSIS (improved)
+   ═══════════════════════════════════════════ */
+function analyzeCentering(d,w,h,bn){
+  const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
+  // Try multiple variance thresholds and pick the most symmetric result
+  const thresholds = [100, 150, 200, 300, 500];
+  let bestResult = null, bestSymmetry = Infinity;
+  
+  for (const vT of thresholds) {
+    let bL=0,bR=0,bT=0,bB=0;
+    const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,x,Math.min(h-1,y)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,Math.min(w-1,x),y));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    
+    for(let x=cl+~~(cW*.03);x<cl+~~(cW*.25);x++) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bL=x-cl;break;}
+    for(let x=cr-~~(cW*.03);x>cr-~~(cW*.25);x--) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bR=cr-x;break;}
+    for(let y=ct+~~(cH*.03);y<ct+~~(cH*.25);y++) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bT=y-ct;break;}
+    for(let y=cb-~~(cH*.03);y>cb-~~(cH*.25);y--) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bB=cb-y;break;}
+    
+    if (bL > 0 && bR > 0 && bT > 0 && bB > 0) {
+      // Prefer results where borders are reasonable (5-20% of card dimension)
+      const lrTotal = bL+bR, tbTotal = bT+bB;
+      const lrPct = lrTotal/cW, tbPct = tbTotal/cH;
+      if (lrPct > 0.03 && lrPct < 0.35 && tbPct > 0.03 && tbPct < 0.35) {
+        const symmetry = Math.abs(bL-bR)/Math.max(1,lrTotal) + Math.abs(bT-bB)/Math.max(1,tbTotal);
+        if (symmetry < bestSymmetry || !bestResult) {
+          bestSymmetry = symmetry;
+          bestResult = { borderL:bL, borderR:bR, borderT:bT, borderB:bB };
+        }
+      }
+    }
+  }
+  
+  if (!bestResult) bestResult = { borderL: ~~(cW*0.05), borderR: ~~(cW*0.05), borderT: ~~(cH*0.07), borderB: ~~(cH*0.07) };
+  
+  const {borderL:bL,borderR:bR,borderT:bT,borderB:bB} = bestResult;
+  const tLR=bL+bR, tTB=bT+bB;
+  const lrRatio = Math.round((tLR>0?(bL/tLR)*100:50)*10)/10;
+  const tbRatio = Math.round((tTB>0?(bT/tTB)*100:50)*10)/10;
+  
+  return { borderL:bL, borderR:bR, borderT:bT, borderB:bB, lrRatio, tbRatio };
+}
+
+/* ═══════════════════════════════════════════
+   DINGS-BASED DETECTION ENGINE
+   ═══════════════════════════════════════════
+   Each module detects defects and classifies
+   them as TAG DINGS types with side + location
+   ═══════════════════════════════════════════ */
+
+// Centering DINGS check — TAG threshold: 55/45 front, 65/35 back for Gem Mint
+function checkCenteringDings(centering, side) {
+  const maxLR = Math.max(centering.lrRatio, 100 - centering.lrRatio);
+  const maxTB = Math.max(centering.tbRatio, 100 - centering.tbRatio);
+  const worst = Math.max(maxLR, maxTB);
+  const threshold = side === "front" ? 55 : 65;
+  
+  if (worst > threshold) {
+    return [{
+      side: side === "front" ? "FRONT" : "BACK",
+      type: "CENTERING",
+      location: `${centering.lrRatio}L/${Math.round((100-centering.lrRatio)*10)/10}R ${centering.tbRatio}T/${Math.round((100-centering.tbRatio)*10)/10}B`,
+      severity: worst - threshold,
+    }];
+  }
+  return [];
+}
+
+// Corner wear detection
+function detectCornerDings(d, w, h, bn, side) {
+  const { left:cl, right:cr, top:ct, bottom:cb, cardW:cW, cardH:cH } = bn;
+  const cs = Math.max(24, ~~(Math.min(cW, cH) * 0.09));
+  const corners = [
+    { name:"TOP LEFT", x:cl, y:ct },
+    { name:"TOP RIGHT", x:cr-cs, y:ct },
+    { name:"BOTTOM LEFT", x:cl, y:cb-cs },
+    { name:"BOTTOM RIGHT", x:cr-cs, y:cb-cs },
+  ];
+  
+  const dings = [];
+  const details = [];
+  
+  for (const { name, x:cx, y:cy } of corners) {
+    let whitePixels=0, totalPixels=0, sharpness=0, gradCount=0;
+    
+    for (let dy=0; dy<cs; dy++) for (let dx=0; dx<cs; dx++) {
+      const X=Math.min(w-1,Math.max(0,cx+dx)), Y=Math.min(h-1,Math.max(0,cy+dy));
+      const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); totalPixels++;
+      if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) whitePixels++;
+      if(dx<cs-1 && dy<cs-1){
+        const gx=Math.abs(LUM(...PX(d,w,Math.min(w-1,X+1),Y))-l);
+        const gy=Math.abs(LUM(...PX(d,w,X,Math.min(h-1,Y+1)))-l);
+        sharpness+=Math.sqrt(gx*gx+gy*gy); gradCount++;
+      }
+    }
+    
+    const whiteRatio = totalPixels>0 ? whitePixels/totalPixels : 0;
+    const avgSharp = gradCount>0 ? sharpness/gradCount : 0;
+    
+    // Fray/Fill/Angle scoring (TAG-style supplementary metrics)
+    let fray = 1000, fill = 1000, angle = 1000;
+    if (whiteRatio > 0.30) { fray -= 20; fill -= 25; }
+    else if (whiteRatio > 0.15) { fray -= 10; fill -= 12; }
+    else if (whiteRatio > 0.05) { fray -= 3; fill -= 5; }
+    if (avgSharp < 5) angle -= 8;
+    else if (avgSharp < 8) angle -= 4;
+    else if (avgSharp < 12) angle -= 2;
+    
+    const sideLabel = side === "front" ? "FRONT" : "BACK";
+    
+    // DING threshold — visible wear that impacts grade
+    const hasWear = whiteRatio > 0.12 || avgSharp < 4;
+    if (hasWear) {
+      dings.push({
+        side: sideLabel,
+        type: "CORNER WEAR",
+        location: `${sideLabel} / ${name}`,
+        severity: whiteRatio > 0.25 ? 3 : whiteRatio > 0.15 ? 2 : 1,
+        desc: whiteRatio > 0.25 ? "Significant corner whitening" : whiteRatio > 0.15 ? "Corner wear with whitening" : "Light corner wear",
+      });
+    }
+    
+    details.push({ name, fray, fill, angle: side==="front" ? angle : undefined, whiteRatio: Math.round(whiteRatio*1000)/10, sharpness: Math.round(avgSharp*10)/10, hasDing: hasWear, cropX:cx, cropY:cy, cropSize:cs });
+  }
+  
+  return { dings, details };
+}
+
+// Edge wear detection
+function detectEdgeDings(d, w, h, bn, side) {
+  const { left:cl, right:cr, top:ct, bottom:cb, cardW:cW, cardH:cH } = bn;
+  const eW = Math.max(5, ~~(Math.min(cW, cH) * 0.025));
+  const sampleCount = 80;
+  
+  const edges = [
+    { name:"TOP", samples: Array.from({length:sampleCount},(_,i)=>({x:cl+~~(cW*(i+1)/(sampleCount+1)),y:ct})), dir:"h",
+      cropX:cl+~~(cW*.2), cropY:ct, cropW:~~(cW*.6), cropH:~~(cH*.05) },
+    { name:"BOTTOM", samples: Array.from({length:sampleCount},(_,i)=>({x:cl+~~(cW*(i+1)/(sampleCount+1)),y:cb-eW})), dir:"h",
+      cropX:cl+~~(cW*.2), cropY:cb-~~(cH*.05), cropW:~~(cW*.6), cropH:~~(cH*.05) },
+    { name:"LEFT", samples: Array.from({length:sampleCount},(_,i)=>({x:cl,y:ct+~~(cH*(i+1)/(sampleCount+1))})), dir:"v",
+      cropX:cl, cropY:ct+~~(cH*.2), cropW:~~(cW*.05), cropH:~~(cH*.6) },
+    { name:"RIGHT", samples: Array.from({length:sampleCount},(_,i)=>({x:cr-eW,y:ct+~~(cH*(i+1)/(sampleCount+1))})), dir:"v",
+      cropX:cr-~~(cW*.05), cropY:ct+~~(cH*.2), cropW:~~(cW*.05), cropH:~~(cH*.6) },
+  ];
+  
+  const dings = [];
+  const details = [];
+  const sideLabel = side === "front" ? "FRONT" : "BACK";
+  
+  for (const { name, samples, dir, cropX, cropY, cropW, cropH } of edges) {
+    let whiteCount=0, roughness=0, prevLum=-1, totalSamples=0;
+    
+    samples.forEach(({x:sx,y:sy}) => {
+      for(let dd=0; dd<eW; dd++){
+        const ex=Math.min(w-1,Math.max(0,dir==="v"?sx+dd:sx));
+        const ey=Math.min(h-1,Math.max(0,dir==="h"?sy+dd:sy));
+        const [r,g,b]=PX(d,w,ex,ey); const l=LUM(r,g,b);
+        totalSamples++;
+        if(l>220 && Math.abs(r-g)<18 && Math.abs(g-b)<18) whiteCount++;
+        if(prevLum>=0) roughness+=Math.abs(l-prevLum);
+        prevLum=l;
+      }
+    });
+    
+    const whiteRatio = whiteCount/totalSamples;
+    const avgRoughness = roughness/totalSamples;
+    
+    let fray = 1000, fill = 1000;
+    if(whiteRatio > 0.20) { fray-=15; fill-=20; }
+    else if(whiteRatio > 0.08) { fray-=6; fill-=8; }
+    else if(whiteRatio > 0.03) { fray-=2; fill-=3; }
+    if(avgRoughness > 20) { fray-=5; fill-=5; }
+    
+    const hasWear = whiteRatio > 0.08 || avgRoughness > 28;
+    if (hasWear) {
+      dings.push({
+        side: sideLabel,
+        type: "EDGE WEAR",
+        location: `${sideLabel} / ${name}`,
+        severity: whiteRatio > 0.20 ? 3 : whiteRatio > 0.12 ? 2 : 1,
+        desc: whiteRatio > 0.20 ? "Edge chipping/whitening" : whiteRatio > 0.12 ? "Visible edge wear" : "Minor edge wear",
+      });
+    }
+    
+    details.push({ name, fray, fill, whiteRatio: Math.round(whiteRatio*1000)/10, roughness: Math.round(avgRoughness*10)/10, hasDing: hasWear, cropX, cropY, cropW, cropH });
+  }
+  
+  return { dings, details };
+}
+
+// Surface defect detection
+function detectSurfaceDings(d, w, h, bn, side) {
+  const { left:cl, right:cr, top:ct, bottom:cb, cardW:cW, cardH:cH } = bn;
+  const mg=0.10;
+  const sx=cl+~~(cW*mg), sy=ct+~~(cH*mg), ex=cr-~~(cW*mg), ey=cb-~~(cH*mg);
+  const sw=ex-sx, sh=ey-sy;
+  const gX=24, gY=32, cellW=~~(sw/gX), cellH=~~(sh/gY);
+  const sideLabel = side === "front" ? "FRONT" : "BACK";
+  const dings = [];
+  const defectCells = [];
+  
+  let gSum=0, gSq=0, gN=0;
+  const step=2;
+  
+  // Global stats
+  for(let gy=0;gy<gY;gy++) for(let gx=0;gx<gX;gx++){
+    const bx=sx+gx*cellW, by=sy+gy*cellH;
+    for(let dy=0;dy<cellH;dy+=step) for(let dx=0;dx<cellW;dx+=step){
+      const l=LUM(...PX(d,w,Math.min(w-1,bx+dx),Math.min(h-1,by+dy)));
+      gSum+=l; gSq+=l*l; gN++;
+    }
+  }
+  const gMean=gN>0?gSum/gN:128, gVar=gN>0?gSq/gN-gMean**2:0;
+  
+  // Cell analysis
+  const cells=[];
+  for(let gy=0;gy<gY;gy++){cells[gy]=[];for(let gx=0;gx<gX;gx++){
+    const bx=sx+gx*cellW, by=sy+gy*cellH;
+    let sm=0,n=0,lv=0; const vs=[];
+    for(let dy=0;dy<cellH;dy+=step) for(let dx=0;dx<cellW;dx+=step){
+      const l=LUM(...PX(d,w,Math.min(w-1,bx+dx),Math.min(h-1,by+dy)));
+      sm+=l; n++; vs.push(l);
+    }
+    const mean=n>0?sm/n:128; for(const v of vs) lv+=(v-mean)**2;
+    cells[gy][gx]={mean, variance:n>0?lv/n:0};
+  }}
+  
+  // Detect anomalous regions
+  let anomCount=0, scratchCount=0, totalCells=0;
+  for(let gy=1;gy<gY-1;gy++) for(let gx=1;gx<gX-1;gx++){
+    totalCells++;
+    const c=cells[gy][gx];
+    const nbs=[cells[gy-1][gx],cells[gy+1][gx],cells[gy][gx-1],cells[gy][gx+1]];
+    const nMean=nbs.reduce((s,n)=>s+n.mean,0)/4;
+    const diff=Math.abs(c.mean-nMean);
+    
+    if(diff>18){anomCount++;defectCells.push({gx,gy,type:"anomaly",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
+    else if(diff>10){anomCount+=0.3;defectCells.push({gx,gy,type:"mark",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
+    if(c.variance>gVar*2.2 && c.variance>150){scratchCount++;defectCells.push({gx,gy,type:"scratch",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:c.variance});}
+  }
+  
+  const anomRate = totalCells>0 ? anomCount/totalCells : 0;
+  const scratchRate = totalCells>0 ? scratchCount/totalCells : 0;
+  
+  // Classify as DINGS
+  if (anomRate > 0.06 || scratchRate > 0.05) {
+    dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
+  } else if (anomRate > 0.025 || scratchRate > 0.025) {
+    dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:2, desc:"Surface wear visible" });
+  } else if (anomRate > 0.012 || scratchRate > 0.015) {
+    dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:1, desc:"Minor surface imperfection" });
+  }
+  
+  // Cluster defect cells for crop previews
+  const regions = clusterDefects(defectCells, cellW);
+  
+  return { dings, anomalyRate:Math.round(anomRate*10000)/100, scratchRate:Math.round(scratchRate*10000)/100, defectRegions:regions };
+}
+
+function clusterDefects(cells,cW){
+  if(!cells.length)return[];
+  const used=new Set(), regions=[], sorted=[...cells].sort((a,b)=>b.severity-a.severity);
+  for(const c of sorted){
+    const k=`${c.gx},${c.gy}`; if(used.has(k))continue; used.add(k);
+    let mX=c.x,mY=c.y,MX=c.x+c.w,MY=c.y+c.h,ms=c.severity;
+    const ty=new Set([c.type]);
+    for(const o of sorted){const ok=`${o.gx},${o.gy}`;if(!used.has(ok)&&Math.abs(o.gx-c.gx)<=2&&Math.abs(o.gy-c.gy)<=2){
+      used.add(ok);mX=Math.min(mX,o.x);mY=Math.min(mY,o.y);MX=Math.max(MX,o.x+o.w);MY=Math.max(MY,o.y+o.h);ms=Math.max(ms,o.severity);ty.add(o.type);
+    }}
+    const pad=cW*3;
+    regions.push({x:mX-pad,y:mY-pad,w:(MX-mX)+pad*2,h:(MY-mY)+pad*2,severity:ms,types:[...ty]});
+    if(regions.length>=6)break;
+  }
+  return regions;
+}
+
+/* ═══════════════════════════════════════════
+   DINGS-BASED SCORING ENGINE
+   Calibrated against real TAG DIG reports:
+   Grade 10: 0 DINGS
+   Grade 9:  1 DING (centering only)
+   Grade 8:  4 DINGS (all back, no surface)
+   Grade 7:  5 DINGS (front surface + ink + edge, back corners)
+   Grade 6:  4 DINGS (front surface, back corner/edge)
+   Grade 5:  6 DINGS (front+back surface, back corners+edge)
+   ═══════════════════════════════════════════ */
+function computeGrade(frontDings, backDings, frontCenter, backCenter) {
+  const allDings = [...frontDings, ...backDings];
+  const totalDings = allDings.length;
+  
+  // Weighted severity: front defects count ~2x
+  let weightedScore = 0;
+  for (const ding of allDings) {
+    const sideMultiplier = ding.side === "FRONT" ? 2.0 : 1.0;
+    let typeWeight = 1;
+    if (ding.type.includes("SURFACE")) typeWeight = 2.5;
+    else if (ding.type.includes("EDGE")) typeWeight = 1.5;
+    else if (ding.type.includes("CORNER")) typeWeight = 1.2;
+    else if (ding.type === "CENTERING") typeWeight = 1.8;
+    
+    weightedScore += ding.severity * sideMultiplier * typeWeight;
+  }
+  
+  // Map weighted score to TAG 1000-point scale
+  // From calibration data:
+  // 0 weighted → 970 (Gem Mint 10)
+  // ~1.8 (centering ding) → 920 (Mint 9)
+  // ~7 (4 back dings) → 830 (NM-MT 8)
+  // ~18 (5 mixed dings with front surface) → 740 (NM 7)
+  // ~14 (4 dings with front surface) → 631 (EX-MT 6)
+  // ~22 (6 dings, front+back surface) → 540 (EX 5)
+  
+  let tagScore;
+  if (weightedScore === 0) {
+    // Check centering closeness for 10 vs Pristine 10
+    const fMaxOff = Math.max(Math.max(frontCenter.lrRatio,100-frontCenter.lrRatio), Math.max(frontCenter.tbRatio,100-frontCenter.tbRatio));
+    const bMaxOff = Math.max(Math.max(backCenter.lrRatio,100-backCenter.lrRatio), Math.max(backCenter.tbRatio,100-backCenter.tbRatio));
+    if (fMaxOff <= 51 && bMaxOff <= 52) tagScore = 995; // Pristine
+    else if (fMaxOff <= 53 && bMaxOff <= 55) tagScore = 975;
+    else tagScore = 960;
+  } else if (weightedScore <= 2) {
+    tagScore = Math.round(940 - weightedScore * 15);
+  } else if (weightedScore <= 5) {
+    tagScore = Math.round(910 - (weightedScore - 2) * 25);
+  } else if (weightedScore <= 10) {
+    tagScore = Math.round(835 - (weightedScore - 5) * 18);
+  } else if (weightedScore <= 18) {
+    tagScore = Math.round(745 - (weightedScore - 10) * 13);
+  } else if (weightedScore <= 28) {
+    tagScore = Math.round(640 - (weightedScore - 18) * 12);
+  } else {
+    tagScore = Math.max(300, Math.round(520 - (weightedScore - 28) * 8));
+  }
+  
+  return {
+    tagScore: Math.max(300, Math.min(1000, tagScore)),
+    grade: getGrade(tagScore),
+    totalDings,
+    weightedScore: Math.round(weightedScore * 10) / 10,
+    allDings,
+  };
+}
+
+/* ═══════════════════════════════════════════
+   SURFACE VISION MAPS
+   ═══════════════════════════════════════════ */
+function genMaps(src){return new Promise(async r=>{
+  const{canvas,w,h,data}=await loadImg(src,800);const d=data.data;
+  const mk=()=>{const c=document.createElement("canvas");c.width=w;c.height=h;return c;};
+  const L=(Y,X)=>LUM(d[(Y*w+X)*4],d[(Y*w+X)*4+1],d[(Y*w+X)*4+2]);
+  
+  // Emboss
+  const eC=mk(),eX=eC.getContext("2d"),eD=eX.createImageData(w,h),e=eD.data;
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=(y*w+x)*4,v=Math.min(255,Math.max(0,128+(L(y+1,x+1)-L(y-1,x-1))*2));e[i]=e[i+1]=e[i+2]=v;e[i+3]=255;}
+  eX.putImageData(eD,0,0);
+  
+  // High-pass
+  const hC=mk(),hX=hC.getContext("2d"),hD=hX.createImageData(w,h),hp=hD.data;
+  for(let y=8;y<h-8;y++)for(let x=8;x<w-8;x++){const i=(y*w+x)*4;let ls=0,ln=0;for(let dy=-8;dy<=8;dy+=2)for(let dx=-8;dx<=8;dx+=2){ls+=L(y+dy,x+dx);ln++;}const v=Math.min(255,Math.max(0,128+(L(y,x)-ls/ln)*3));hp[i]=hp[i+1]=hp[i+2]=v;hp[i+3]=255;}
+  hX.putImageData(hD,0,0);
+  
+  // Sobel edges
+  const dC=mk(),dX=dC.getContext("2d"),dD=dX.createImageData(w,h),ed=dD.data;
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=(y*w+x)*4;const gx=-L(y-1,x-1)+L(y-1,x+1)-2*L(y,x-1)+2*L(y,x+1)-L(y+1,x-1)+L(y+1,x+1);const gy=-L(y-1,x-1)-2*L(y-1,x)-L(y-1,x+1)+L(y+1,x-1)+2*L(y+1,x)+L(y+1,x+1);const m=Math.min(255,Math.sqrt(gx*gx+gy*gy));ed[i]=~~(m*.2);ed[i+1]=~~(m*.9);ed[i+2]=~~m;ed[i+3]=255;}
+  dX.putImageData(dD,0,0);
+  
+  r({original:canvas.toDataURL(),emboss:eC.toDataURL(),highpass:hC.toDataURL(),edges:dC.toDataURL(),width:w,height:h});
+});}
+
+function cropReg(src,rg,mx=220){return new Promise(r=>{const img=new Image();img.crossOrigin="anonymous";img.onload=()=>{const cx=Math.max(0,rg.x),cy=Math.max(0,rg.y),cw=Math.min(rg.w,img.width-cx),ch=Math.min(rg.h,img.height-cy);if(cw<=0||ch<=0){r(null);return;}const sc=Math.min(mx/cw,mx/ch,3);const c=document.createElement("canvas");c.width=~~(cw*sc);c.height=~~(ch*sc);const ctx=c.getContext("2d");ctx.imageSmoothingEnabled=false;ctx.drawImage(img,cx,cy,cw,ch,0,0,c.width,c.height);r(c.toDataURL());};img.src=src;});}
+
+/* ═══════════════════════════════════════════
+   FULL ANALYSIS PIPELINE
+   ═══════════════════════════════════════════ */
+async function analyzeCardFull(src, side) {
+  const { w, h, data } = await loadImg(src);
+  const d = data.data;
+  const bounds = findBounds(d, w, h);
+  const centering = analyzeCentering(d, w, h, bounds);
+  const centerDings = checkCenteringDings(centering, side);
+  const corners = detectCornerDings(d, w, h, bounds, side);
+  const edges = detectEdgeDings(d, w, h, bounds, side);
+  const surface = detectSurfaceDings(d, w, h, bounds, side);
+  
+  const allDings = [...centerDings, ...corners.dings, ...edges.dings, ...surface.dings];
+  
+  return {
+    centering,
+    centerDings,
+    corners,
+    edges,
+    surface,
+    allDings,
+    bounds,
+  };
+}
+
+
+/* ═══════════════════════════════════════════
+   UI COMPONENTS
+   ═══════════════════════════════════════════ */
+
+function ScoreRing({score,size=80,strokeWidth=4,label}){
+  const g=getGrade(score),pct=Math.min(100,Math.max(0,(score-300)/7)),r=(size-strokeWidth)/2,c=Math.PI*2*r;
+  return(<div style={{textAlign:"center"}}><svg width={size} height={size} style={{transform:"rotate(-90deg)"}}><circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#1a1c22" strokeWidth={strokeWidth}/><circle cx={size/2} cy={size/2} r={r} fill="none" stroke={g.color} strokeWidth={strokeWidth} strokeDasharray={c} strokeDashoffset={c-(pct/100)*c} strokeLinecap="round" style={{transition:"stroke-dashoffset .8s ease"}}/></svg>
+    <div style={{marginTop:-size+12,position:"relative",height:size-16,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}><div style={{fontFamily:mono,fontSize:size>70?22:14,fontWeight:700,color:g.color}}>{score}</div>{label&&<div style={{fontFamily:mono,fontSize:8,color:"#555",textTransform:"uppercase",letterSpacing:".1em",marginTop:2}}>{label}</div>}</div></div>);
+}
+
+function SubScoreBar({label,score,icon}){const g=getGrade(score),pct=Math.min(100,Math.max(0,(score-300)/7));return(<div style={{marginBottom:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:13}}>{icon}</span><span style={{fontFamily:mono,fontSize:11,color:"#999",textTransform:"uppercase",letterSpacing:".08em"}}>{label}</span></div><span style={{fontFamily:mono,fontSize:13,fontWeight:600,color:g.color}}>{score}</span></div><div style={{height:4,background:"#1a1c22",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:g.color,borderRadius:2,transition:"width .6s ease"}}/></div></div>);}
+
+function SurfaceVision({maps,label}){
+  const[mode,setMode]=useState("original"),[blend,setBlend]=useState(0);
+  const modes=[{id:"original",l:"Normal"},{id:"emboss",l:"Emboss"},{id:"highpass",l:"Hi-Pass"},{id:"edges",l:"Edges"}];
+  if(!maps)return null;
+  return(<div style={{marginBottom:16,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",overflow:"hidden"}}>
+    <div style={{padding:"10px 12px 6px"}}><span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{label} — Card Vision</span></div>
+    <div style={{position:"relative",width:"100%",aspectRatio:`${maps.width}/${maps.height}`,background:"#0a0a0a"}}><img src={maps.original} style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"contain"}}/>{mode!=="original"&&<img src={maps[mode]} style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"contain",opacity:blend/100,mixBlendMode:mode==="edges"?"screen":"normal"}}/>}</div>
+    <div style={{display:"flex",gap:4,padding:"8px 8px 4px"}}>{modes.map(m=>(<button key={m.id} onClick={()=>{setMode(m.id);if(m.id!=="original"&&blend===0)setBlend(80);}} style={{flex:1,padding:"5px 3px",borderRadius:5,background:mode===m.id?"rgba(0,255,136,.1)":"transparent",border:`1px solid ${mode===m.id?"#00ff8833":"#1a1c22"}`,color:mode===m.id?"#00ff88":"#555",fontFamily:mono,fontSize:9,textTransform:"uppercase",cursor:"pointer"}}>{m.l}</button>))}</div>
+    {mode!=="original"&&<div style={{padding:"4px 12px 10px"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontFamily:mono,fontSize:8,color:"#444"}}>TRANSPARENCY</span><span style={{fontFamily:mono,fontSize:10,color:"#00ff88"}}>{blend}%</span></div><input type="range" min="0" max="100" value={blend} onChange={e=>setBlend(+e.target.value)} style={{width:"100%",accentColor:"#00ff88"}}/></div>}
+  </div>);
+}
+
+/* DINGS Map Schematic */
+function DingsMap({ frontResult, backResult }) {
+  const [side, setSide] = useState("front");
+  const result = side === "front" ? frontResult : backResult;
+  if (!result) return null;
+  
+  const cornerData = result.corners.details;
+  const edgeData = result.edges.details;
+  const centering = result.centering;
+  const sideLabel = side === "front" ? "FRONT" : "BACK";
+  
+  const dingColor = "#ff6633";
+  const cleanColor = "#333";
+  
+  const getCorner = (name) => cornerData.find(c => c.name === name) || {};
+  const getEdge = (name) => edgeData.find(e => e.name === name) || {};
+  
+  const ScoreLabel = ({x, y, data, showAngle}) => (
+    <g>
+      <text x={x} y={y} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Fray: {data.fray || "—"}</text>
+      <text x={x} y={y+10} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Fill: {data.fill || "—"}</text>
+      {showAngle && data.angle && <text x={x} y={y+20} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Angle: {data.angle}</text>}
+    </g>
+  );
+  
+  return (
+    <div style={{background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",padding:12,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>DINGS Map</span>
+        <div style={{display:"flex",gap:4}}>
+          {["front","back"].map(s=>(<button key={s} onClick={()=>setSide(s)} style={{padding:"4px 10px",borderRadius:4,background:side===s?"rgba(0,255,136,.1)":"transparent",border:`1px solid ${side===s?"#00ff8833":"#1a1c22"}`,color:side===s?"#00ff88":"#555",fontFamily:mono,fontSize:9,textTransform:"uppercase",cursor:"pointer"}}>{s}</button>))}
+        </div>
+      </div>
+      <svg viewBox="0 0 320 420" style={{width:"100%"}}>
+        {/* Card outline */}
+        <rect x="80" y="40" width="160" height="224" rx="6" fill="none" stroke="#333" strokeWidth="1.5"/>
+        
+        {/* Center crosshair */}
+        <line x1="160" y1="40" x2="160" y2="264" stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
+        <line x1="80" y1="152" x2="240" y2="152" stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
+        
+        {/* TAG logo center */}
+        <text x="160" y="156" fill="#222" fontSize="10" fontFamily={mono} textAnchor="middle" fontWeight="700">TAG</text>
+        
+        {/* Centering values */}
+        <text x="160" y="34" fill="#888" fontSize="8" fontFamily={mono} textAnchor="middle">C: {centering.tbRatio}</text>
+        <text x="160" y="278" fill="#888" fontSize="8" fontFamily={mono} textAnchor="middle">C: {Math.round((100-centering.tbRatio)*10)/10}</text>
+        <text x="72" y="156" fill="#888" fontSize="8" fontFamily={mono} textAnchor="end">C: {centering.lrRatio}</text>
+        <text x="248" y="156" fill="#888" fontSize="8" fontFamily={mono} textAnchor="start">C: {Math.round((100-centering.lrRatio)*10)/10}</text>
+        
+        {/* Corner indicators */}
+        {[{name:"TOP LEFT",x:80,y:40,lx:30,ly:310},{name:"TOP RIGHT",x:240,y:40,lx:290,ly:310},{name:"BOTTOM LEFT",x:80,y:264,lx:30,ly:370},{name:"BOTTOM RIGHT",x:240,y:264,lx:290,ly:370}].map(({name,x,y,lx,ly})=>{
+          const data = getCorner(name);
+          return(<g key={name}>
+            <rect x={x-6} y={y-6} width={12} height={12} rx={2} fill="none" stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?2:1} strokeDasharray={data.hasDing?"none":"3,3"}/>
+            <text x={lx} y={ly} fill={data.hasDing?dingColor:"#555"} fontSize="7" fontFamily={mono} textAnchor="middle">{name.replace(" ","\n")}</text>
+            <ScoreLabel x={lx} y={ly+12} data={data} showAngle={side==="front"}/>
+          </g>);
+        })}
+        
+        {/* Edge indicators */}
+        {[{name:"TOP",x1:110,y1:40,x2:210,y2:40,lx:160,ly:300},{name:"BOTTOM",x1:110,y1:264,x2:210,y2:264,lx:160,ly:390},{name:"LEFT",x1:80,y1:80,x2:80,y2:224,lx:30,ly:340},{name:"RIGHT",x1:240,y1:80,x2:240,y2:224,lx:290,ly:340}].map(({name,x1,y1,x2,y2,lx,ly})=>{
+          const data = getEdge(name);
+          return(<g key={name}>
+            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?3:1}/>
+            <text x={lx} y={ly} fill={data.hasDing?dingColor:"#555"} fontSize="7" fontFamily={mono} textAnchor="middle">{name} EDGE</text>
+            <ScoreLabel x={lx} y={ly+12} data={data} showAngle={false}/>
+          </g>);
+        })}
+        
+        {/* Side label */}
+        <text x="160" y="410" fill="#444" fontSize="9" fontFamily={mono} textAnchor="middle">{sideLabel}</text>
+      </svg>
+    </div>
+  );
+}
+
+/* DINGS Preview Cards */
+function DingsPreview({frontResult,backResult,frontMaps,backMaps,frontImg,backImg}){
+  const[crops,setCrops]=useState([]),[loading,setLoading]=useState(true);
+  useEffect(()=>{(async()=>{setLoading(true);const all=[];
+    for(const[sLabel,result,img,maps]of[["Front",frontResult,frontImg,frontMaps],["Back",backResult,backImg,backMaps]]){
+      if(!result||!img)continue;
+      for(const c of result.corners.details){if(!c.hasDing)continue;const rg={x:c.cropX,y:c.cropY,w:c.cropSize,h:c.cropSize};
+        const norm=await cropReg(img,rg);const enh=maps?.emboss?await cropReg(maps.emboss,rg):null;
+        if(norm)all.push({area:"Corner",loc:`${sLabel} / ${c.name}`,fray:c.fray,fill:c.fill,angle:c.angle,norm,enh,enhLabel:"Emboss"});}
+      for(const e of result.edges.details){if(!e.hasDing)continue;const rg={x:e.cropX,y:e.cropY,w:e.cropW,h:e.cropH};
+        const norm=await cropReg(img,rg);const enh=maps?.emboss?await cropReg(maps.emboss,rg):null;
+        if(norm)all.push({area:"Edge",loc:`${sLabel} / ${e.name}`,fray:e.fray,fill:e.fill,norm,enh,enhLabel:"Emboss"});}
+      for(const rg of (result.surface.defectRegions||[])){
+        const norm=await cropReg(img,rg);const enh=maps?.highpass?await cropReg(maps.highpass,rg):null;
+        if(norm)all.push({area:"Surface",loc:sLabel,norm,enh,enhLabel:"Hi-Pass"});}
+    }
+    setCrops(all);setLoading(false);})();},[frontResult,backResult,frontMaps,backMaps,frontImg,backImg]);
+  
+  if(loading)return<div style={{padding:20,textAlign:"center"}}><div style={{fontFamily:mono,fontSize:11,color:"#555"}}>Generating previews...</div></div>;
+  if(!crops.length)return<div style={{padding:16,background:"rgba(0,255,136,.05)",borderRadius:8,border:"1px solid rgba(0,255,136,.15)"}}><div style={{fontFamily:mono,fontSize:11,color:"#00ff88"}}>No defects to preview</div></div>;
+  
+  return(<div style={{display:"flex",flexDirection:"column",gap:10}}>{crops.map((c,i)=>(
+    <div key={i} style={{background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",overflow:"hidden"}}>
+      <div style={{padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #151720"}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <div style={{width:4,height:4,borderRadius:"50%",background:"#ff6633"}}/>
+          <span style={{fontFamily:mono,fontSize:10,color:"#888",textTransform:"uppercase"}}>{c.area}</span>
+          <span style={{color:"#555",fontSize:10}}>·</span>
+          <span style={{fontFamily:mono,fontSize:10,color:"#aaa"}}>{c.loc}</span>
+        </div>
+        {c.fray!==undefined&&<div style={{fontFamily:mono,fontSize:9,color:"#555"}}>F:{c.fray} Fi:{c.fill}{c.angle!==undefined?` A:${c.angle}`:""}</div>}
+      </div>
+      <div style={{display:"flex",gap:1,background:"#111"}}>
+        <div style={{flex:1,position:"relative"}}><img src={c.norm} style={{width:"100%",display:"block",imageRendering:"pixelated"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(255,255,255,.5)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>NORMAL</div></div>
+        {c.enh&&<div style={{flex:1,position:"relative"}}><img src={c.enh} style={{width:"100%",display:"block",imageRendering:"pixelated"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(0,255,136,.7)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>{c.enhLabel}</div></div>}
+      </div>
+    </div>
+  ))}</div>);
+}
+
+/* ═══════════════════════════════════════════
+   CAMERA VIEWFINDER (live level + card guide)
+   ═══════════════════════════════════════════ */
+function CameraViewfinder({ side, onCapture, onClose }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const [active, setActive] = useState(false);
+  const [tilt, setTilt] = useState({ beta:0, gamma:0 });
+  const [orientPerm, setOrientPerm] = useState("unknown");
+  const [captured, setCaptured] = useState(null);
+  const [validating, setValidating] = useState(false);
+  const [validation, setValidation] = useState(null);
+  const [camError, setCamError] = useState(null);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode:"environment", width:{ideal:1920}, height:{ideal:1440} }, audio:false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t=>t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+        setActive(true);
+      } catch(err) { setCamError(err.name==="NotAllowedError"?"Camera permission denied":"Camera not available — use upload"); }
+    })();
+    return () => { cancelled=true; streamRef.current?.getTracks().forEach(t=>t.stop()); };
+  }, []);
+
+  useEffect(() => {
+    const handler = e => setTilt({ beta:Math.round((e.beta||0)*10)/10, gamma:Math.round((e.gamma||0)*10)/10 });
+    if (typeof DeviceOrientationEvent!=="undefined" && typeof DeviceOrientationEvent.requestPermission==="function") {
+      setOrientPerm("needs-request");
+    } else if (typeof DeviceOrientationEvent!=="undefined") {
+      window.addEventListener("deviceorientation",handler); setOrientPerm("granted");
+      return () => window.removeEventListener("deviceorientation",handler);
+    }
+  }, []);
+
+  const requestOrient = async () => {
+    try {
+      const p = await DeviceOrientationEvent.requestPermission();
+      if (p==="granted") { setOrientPerm("granted"); window.addEventListener("deviceorientation",e=>setTilt({beta:Math.round((e.beta||0)*10)/10,gamma:Math.round((e.gamma||0)*10)/10})); }
+    } catch { setOrientPerm("denied"); }
+  };
+
+  const isLevel=Math.abs(tilt.beta)<2&&Math.abs(tilt.gamma)<2;
+  const isClose=Math.abs(tilt.beta)<5&&Math.abs(tilt.gamma)<5;
+  const lvlColor=isLevel?"#00ff88":isClose?"#ffcc00":"#ff4444";
+  const bx=Math.max(-20,Math.min(20,tilt.gamma*2)), by=Math.max(-20,Math.min(20,tilt.beta*2));
+
+  const captureFrame = () => {
+    if(!videoRef.current) return;
+    const v=videoRef.current, c=document.createElement("canvas");
+    c.width=v.videoWidth; c.height=v.videoHeight;
+    c.getContext("2d").drawImage(v,0,0);
+    const dataUrl=c.toDataURL("image/jpeg",0.92);
+    setCaptured(dataUrl); setValidating(true);
+    validateCap(dataUrl).then(r=>{setValidation(r);setValidating(false);});
+  };
+
+  const acceptCapture = () => { streamRef.current?.getTracks().forEach(t=>t.stop()); onCapture(captured); };
+  const retake = () => { setCaptured(null); setValidation(null); };
+  const closeCam = () => { streamRef.current?.getTracks().forEach(t=>t.stop()); onClose(); };
+  const handleFile = e => { const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>{const d=ev.target.result;setCaptured(d);setValidating(true);validateCap(d).then(r=>{setValidation(r);setValidating(false);});}; r.readAsDataURL(f); };
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:1000,background:"#000",display:"flex",flexDirection:"column"}}>
+      <div style={{padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(0,0,0,.8)",zIndex:10}}>
+        <button onClick={closeCam} style={{background:"transparent",border:"none",color:"#888",fontFamily:mono,fontSize:12,cursor:"pointer"}}>✕ Cancel</button>
+        <div style={{fontFamily:mono,fontSize:12,color:"#fff",textTransform:"uppercase",letterSpacing:".1em"}}>Capture {side}</div>
+        <div style={{width:60}}/>
+      </div>
+
+      <div style={{flex:1,position:"relative",overflow:"hidden"}}>
+        {!captured?(<>
+          {camError?(
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:32}}>
+              <div style={{fontFamily:mono,fontSize:12,color:"#ff4444",marginBottom:16,textAlign:"center"}}>{camError}</div>
+              <button onClick={()=>fileRef.current?.click()} style={{padding:"12px 24px",background:"rgba(0,255,136,.15)",border:"1px solid #00ff8844",borderRadius:8,color:"#00ff88",fontFamily:mono,fontSize:12,cursor:"pointer"}}>Upload Photo Instead</button>
+              <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{display:"none"}}/>
+            </div>
+          ):(
+            <video ref={videoRef} playsInline muted style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+          )}
+
+          {active&&(
+            <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
+              <defs><mask id="cm"><rect width="100%" height="100%" fill="white"/><rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="black"/></mask></defs>
+              <rect width="100%" height="100%" fill="rgba(0,0,0,.45)" mask="url(#cm)"/>
+              <rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="none" stroke={isLevel?"#00ff8888":"#ffffff44"} strokeWidth="2" strokeDasharray={isLevel?"none":"8,6"}/>
+              <line x1="49%" y1="50%" x2="51%" y2="50%" stroke="rgba(255,255,255,.3)" strokeWidth="1"/>
+              <line x1="50%" y1="49%" x2="50%" y2="51%" stroke="rgba(255,255,255,.3)" strokeWidth="1"/>
+              <text x="50%" y="9%" textAnchor="middle" fill="rgba(255,255,255,.5)" fontSize="11" fontFamily={mono}>ALIGN CARD WITHIN GUIDE</text>
+            </svg>
+          )}
+
+          {orientPerm==="granted"&&active&&(
+            <div style={{position:"absolute",bottom:100,left:"50%",transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+              <div style={{width:56,height:56,borderRadius:"50%",border:`2px solid ${lvlColor}44`,background:"rgba(0,0,0,.5)",position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <div style={{position:"absolute",width:10,height:1,background:`${lvlColor}33`}}/>
+                <div style={{position:"absolute",width:1,height:10,background:`${lvlColor}33`}}/>
+                <div style={{position:"absolute",width:12,height:12,borderRadius:"50%",border:`1px solid ${lvlColor}44`}}/>
+                <div style={{width:10,height:10,borderRadius:"50%",background:lvlColor,boxShadow:`0 0 8px ${lvlColor}66`,transform:`translate(${bx}px,${by}px)`,transition:"transform .1s ease-out"}}/>
+              </div>
+              <div style={{fontFamily:mono,fontSize:9,color:lvlColor,textTransform:"uppercase",letterSpacing:".1em"}}>{isLevel?"✓ Level":isClose?"Almost level":"Tilted"}</div>
+            </div>
+          )}
+          {orientPerm==="needs-request"&&active&&(
+            <button onClick={requestOrient} style={{position:"absolute",bottom:110,left:"50%",transform:"translateX(-50%)",padding:"8px 16px",background:"rgba(0,255,136,.15)",border:"1px solid #00ff8844",borderRadius:8,color:"#00ff88",fontFamily:mono,fontSize:10,cursor:"pointer"}}>Enable Level</button>
+          )}
+        </>):(
+          <div style={{width:"100%",height:"100%",position:"relative"}}>
+            <img src={captured} style={{width:"100%",height:"100%",objectFit:"contain"}}/>
+            {validating&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,.6)"}}><div style={{fontFamily:mono,fontSize:12,color:"#00ff88"}}>Checking card detection...</div></div>}
+            {validation&&(
+              <div style={{position:"absolute",bottom:0,left:0,right:0,padding:16,background:"linear-gradient(transparent,rgba(0,0,0,.9))"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:validation.valid?"#00ff88":"#ff4444"}}/>
+                  <span style={{fontFamily:mono,fontSize:12,color:validation.valid?"#00ff88":"#ff4444"}}>{validation.valid?"Card detected — good capture":"Issues detected"}</span>
+                </div>
+                {validation.valid&&<div style={{fontFamily:mono,fontSize:10,color:"#666"}}>Card fills {validation.fillRatio}% of frame</div>}
+                {!validation.valid&&validation.issues.map((is,i)=><div key={i} style={{fontFamily:mono,fontSize:10,color:"#ff9944"}}>⚠ {is}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{padding:"16px 20px 28px",background:"rgba(0,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",gap:20}}>
+        {!captured?(<>
+          <button onClick={()=>fileRef.current?.click()} style={{width:40,height:40,borderRadius:"50%",background:"transparent",border:"1px solid #444",color:"#888",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          </button>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:"none"}}/>
+          <button onClick={captureFrame} disabled={!active&&!camError} style={{width:68,height:68,borderRadius:"50%",background:"transparent",border:`4px solid ${active?"#fff":"#444"}`,cursor:active?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{width:56,height:56,borderRadius:"50%",background:active?"#fff":"#333",transition:"all .2s"}}/>
+          </button>
+          <div style={{width:40}}/>
+        </>):(<>
+          <button onClick={retake} style={{padding:"12px 24px",background:"transparent",border:"1px solid #444",borderRadius:10,color:"#fff",fontFamily:mono,fontSize:12,cursor:"pointer"}}>Retake</button>
+          <button onClick={acceptCapture} style={{padding:"12px 24px",background:validation?.valid?"#00ff88":"rgba(0,255,136,.3)",border:"none",borderRadius:10,color:"#000",fontFamily:mono,fontSize:12,fontWeight:700,cursor:"pointer"}}>{validation?.valid?"✓ Use Photo":"Use Anyway"}</button>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+/* Post-capture validation */
+async function validateCap(src){const{w,h,data}=await loadImg(src,600);const bn=findBounds(data.data,w,h);const fill=bn.cardW*bn.cardH/(w*h),asp=bn.cardH>0?bn.cardW/bn.cardH:0,aDiff=Math.abs(asp-2.5/3.5);const ok=bn.cardW>50&&bn.cardH>50&&fill>.2&&fill<.95&&aDiff<.15;const issues=[];if(bn.cardW<=50)issues.push("Card not detected — use contrasting background");if(fill<.2&&bn.cardW>50)issues.push("Card too small — move closer");if(fill>=.95)issues.push("Too close — back up slightly");if(aDiff>=.15&&bn.cardW>50)issues.push("Card may be tilted");return{valid:ok,fillRatio:~~(fill*100),issues};}
+
+/* Image Capture (opens viewfinder or fallback) */
+function CaptureCard({label,side,image,onImage,onOpenCamera}){
+  const ref=useRef(null);
+  return(<div style={{flex:1}}>
+    <div style={{fontFamily:mono,fontSize:10,color:"#555",textTransform:"uppercase",letterSpacing:".12em",marginBottom:6}}>{label}</div>
+    {!image?(<div onClick={()=>onOpenCamera(side)} style={{aspectRatio:"2.5/3.5",background:"#0d0f13",border:"1px dashed #2a2d35",borderRadius:10,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#444" strokeWidth="1.5"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      <div style={{fontFamily:mono,fontSize:11,color:"#444",marginTop:8}}>Tap to capture</div>
+      <div style={{fontFamily:mono,fontSize:9,color:"#00ff8866",marginTop:4}}>with level + guide</div>
+    </div>):(<div style={{position:"relative",aspectRatio:"2.5/3.5",borderRadius:10,overflow:"hidden",background:"#0a0a0a"}}>
+      <img src={image} style={{width:"100%",height:"100%",objectFit:"contain"}}/>
+      <div style={{position:"absolute",top:4,left:4,fontFamily:mono,fontSize:8,color:"#00ff88",background:"rgba(0,0,0,.6)",padding:"2px 6px",borderRadius:4}}>✓</div>
+      <button onClick={()=>onImage(null)} style={{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(0,0,0,.7)",border:"1px solid #333",color:"#888",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:13}}>×</button>
+    </div>)}
+  </div>);
+}
+
+
+/* ═══════════════════════════════════════════
+   MAIN APP
+   ═══════════════════════════════════════════ */
+export default function TAGPreGrader(){
+  const[step,setStep]=useState(0);
+  const[fI,setFI]=useState(null),[bI,setBI]=useState(null);
+  const[fR,setFR]=useState(null),[bR,setBR]=useState(null);
+  const[fM,setFM]=useState(null),[bM,setBM]=useState(null);
+  const[gradeResult,setGradeResult]=useState(null);
+  const[tab,setTab]=useState("overview"),[prog,setProg]=useState("");
+  const[camTarget,setCamTarget]=useState(null);
+
+  const run=useCallback(async()=>{
+    if(!fI||!bI)return; setStep(1);
+    try{
+      setProg("Detecting card bounds (front)...");await new Promise(r=>setTimeout(r,30));
+      const fr=await analyzeCardFull(fI,"front"); setFR(fr);
+      setProg("Detecting card bounds (back)...");await new Promise(r=>setTimeout(r,30));
+      const br=await analyzeCardFull(bI,"back"); setBR(br);
+      setProg("Computing DINGS-based grade...");await new Promise(r=>setTimeout(r,30));
+      const grade=computeGrade(fr.allDings,br.allDings,fr.centering,br.centering);
+      setGradeResult(grade);
+      setProg("Generating surface vision maps...");await new Promise(r=>setTimeout(r,30));
+      setFM(await genMaps(fI)); setBM(await genMaps(bI));
+      setStep(2);
+    }catch(e){console.error(e);setProg("Error — try better photos");}
+  },[fI,bI]);
+
+  const reset=()=>{setStep(0);setFI(null);setBI(null);setFR(null);setBR(null);setFM(null);setBM(null);setGradeResult(null);setTab("overview");};
+  const handleCam=d=>{if(camTarget==="front")setFI(d);else setBI(d);setCamTarget(null);};
+
+  const tabs=[
+    {id:"overview",l:"Score",i:"◎"},{id:"dings",l:"DINGS",i:"⚠"},{id:"map",l:"Map",i:"◫"},
+    {id:"vision",l:"Vision",i:"◉"},{id:"centering",l:"Center",i:"⊞"},
+    {id:"corners",l:"Corners",i:"◤"},{id:"edges",l:"Edges",i:"▬"},
+    {id:"surface",l:"Surface",i:"◻"},
+  ];
+
+  const gr = gradeResult;
+
+  return(<div style={{minHeight:"100vh",maxWidth:480,margin:"0 auto",background:"#0a0b0e",color:"#e0e0e0",fontFamily:sans,display:"flex",flexDirection:"column"}}>
+    {/* Camera Viewfinder Overlay */}
+    {camTarget&&<CameraViewfinder side={camTarget} onCapture={handleCam} onClose={()=>setCamTarget(null)}/>}
+    {/* Header */}
+    <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1c22",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:"#0a0b0e"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#00ff88,#0088ff)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:900,fontSize:13,color:"#000"}}>TG</div>
+        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.0 — DINGS-Based Engine</div></div>
+      </div>
+      {step===2&&<button onClick={reset} style={{background:"transparent",border:"1px solid #2a2d35",borderRadius:6,color:"#666",fontFamily:mono,fontSize:10,padding:"5px 10px",cursor:"pointer",textTransform:"uppercase"}}>New</button>}
+    </div>
+
+    {/* CAPTURE */}
+    {step===0&&(<div style={{padding:16,flex:1}}>
+      <div style={{display:"flex",gap:12,marginBottom:16}}>
+        <CaptureCard label="Front" side="front" image={fI} onImage={setFI} onOpenCamera={setCamTarget}/>
+        <CaptureCard label="Back" side="back" image={bI} onImage={setBI} onOpenCamera={setCamTarget}/>
+      </div>
+      <button onClick={run} disabled={!fI||!bI} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:fI&&bI?"linear-gradient(135deg,#00ff88,#0088ff)":"#1a1c22",color:fI&&bI?"#000":"#444",fontFamily:mono,fontSize:13,fontWeight:700,cursor:fI&&bI?"pointer":"default",textTransform:"uppercase",letterSpacing:".08em",transition:"all .3s"}}>{fI&&bI?"▶  Analyze Card":"Capture both sides"}</button>
+      <div style={{marginTop:16,padding:14,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22"}}>
+        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.0 — DINGS-Based Scoring</div>
+        <div style={{fontSize:12,color:"#666",lineHeight:1.7}}>
+          Scoring engine rebuilt around <span style={{color:"#ff9944"}}>DINGS detection</span> — the same defect classification system TAG uses.
+          Calibrated against 6 real TAG DIG reports spanning grades 5 through Gem Mint 10.
+          Front defects weighted ~2x heavier than back. Surface play wear is the biggest grade killer.
+        </div>
+      </div>
+    </div>)}
+
+    {/* ANALYZING */}
+    {step===1&&(<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32}}>
+      <div style={{width:48,height:48,borderRadius:"50%",border:"3px solid #1a1c22",borderTopColor:"#00ff88",animation:"spin .8s linear infinite"}}/>
+      <div style={{fontFamily:mono,fontSize:12,color:"#666",marginTop:16}}>{prog}</div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg);}}`}</style>
+    </div>)}
+
+    {/* RESULTS */}
+    {step===2&&gr&&(<div style={{flex:1,display:"flex",flexDirection:"column"}}>
+      <div style={{display:"flex",borderBottom:"1px solid #1a1c22",overflowX:"auto",scrollbarWidth:"none"}}>
+        {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{flex:"0 0 auto",padding:"10px 11px",background:"transparent",border:"none",borderBottom:tab===t.id?`2px solid ${gr.grade.color}`:"2px solid transparent",color:tab===t.id?"#ddd":"#555",fontFamily:mono,fontSize:9,cursor:"pointer",textTransform:"uppercase",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}><span style={{fontSize:13}}>{t.i}</span>{t.l}</button>))}
+      </div>
+      <div style={{flex:1,padding:16,overflowY:"auto"}}>
+
+        {/* OVERVIEW */}
+        {tab==="overview"&&(<div>
+          <div style={{textAlign:"center",padding:"20px 0 16px",background:gr.grade.bg,borderRadius:12,border:`1px solid ${gr.grade.color}22`,marginBottom:16}}>
+            <ScoreRing score={gr.tagScore} size={100} label="TAG Score"/>
+            <div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:gr.grade.color,marginTop:4}}>{gr.grade.label}</div>
+            <div style={{fontFamily:mono,fontSize:10,color:"#555",marginTop:4}}>DINGS-based estimate · TCG</div>
+          </div>
+          
+          <div style={{padding:14,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{fontFamily:mono,fontSize:11,color:"#888"}}>Total DINGS</span>
+              <span style={{fontFamily:mono,fontSize:20,fontWeight:800,color:gr.totalDings===0?"#00ff88":gr.totalDings<=2?"#66dd44":gr.totalDings<=4?"#ffcc00":"#ff6633"}}>{gr.totalDings}</span>
+            </div>
+            {/* DINGS by category */}
+            {["CENTERING","CORNER WEAR","EDGE WEAR","SURFACE / PLAY WEAR"].map(type=>{
+              const count = gr.allDings.filter(d=>d.type===type).length;
+              const frontCount = gr.allDings.filter(d=>d.type===type&&d.side==="FRONT").length;
+              const backCount = gr.allDings.filter(d=>d.type===type&&d.side==="BACK").length;
+              if(count===0)return null;
+              return(<div key={type} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderTop:"1px solid #151720"}}>
+                <span style={{fontFamily:mono,fontSize:10,color:"#ff9944"}}>{type}</span>
+                <span style={{fontFamily:mono,fontSize:10,color:"#888"}}>F:{frontCount} B:{backCount}</span>
+              </div>);
+            })}
+          </div>
+
+          <div style={{display:"flex",gap:8}}>
+            <div style={{flex:1,aspectRatio:"2.5/3.5",borderRadius:8,overflow:"hidden",background:"#0a0a0a"}}><img src={fI} style={{width:"100%",height:"100%",objectFit:"contain"}}/></div>
+            <div style={{flex:1,aspectRatio:"2.5/3.5",borderRadius:8,overflow:"hidden",background:"#0a0a0a"}}><img src={bI} style={{width:"100%",height:"100%",objectFit:"contain"}}/></div>
+          </div>
+        </div>)}
+
+        {/* DINGS */}
+        {tab==="dings"&&(<div>
+          <div style={{textAlign:"center",padding:16,marginBottom:12,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22"}}>
+            <div style={{fontFamily:mono,fontSize:9,color:"#555",textTransform:"uppercase",letterSpacing:".12em",marginBottom:4}}>Defects Identified of Notable Grade Significance</div>
+            <div style={{fontFamily:mono,fontSize:36,fontWeight:800,color:gr.totalDings===0?"#00ff88":gr.totalDings<=2?"#66dd44":gr.totalDings<=4?"#ffcc00":"#ff6633"}}>{gr.totalDings}</div>
+            <div style={{fontFamily:mono,fontSize:10,color:"#444"}}>DINGS</div>
+          </div>
+          
+          {gr.allDings.length>0?(<div style={{marginBottom:14}}>
+            {gr.allDings.map((d,i)=>(
+              <div key={i} style={{padding:"10px 12px",marginBottom:6,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22",borderLeft:"3px solid #ff6633"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <span style={{fontFamily:mono,fontSize:11,color:"#ff9944",fontWeight:600}}>{d.location}</span>
+                  <span style={{fontFamily:mono,fontSize:9,color:"#555",textTransform:"uppercase"}}>{d.type}</span>
+                </div>
+                {d.desc&&<div style={{fontFamily:sans,fontSize:12,color:"#888"}}>{d.desc}</div>}
+              </div>
+            ))}
+          </div>):(<div style={{padding:16,background:"rgba(0,255,136,.05)",borderRadius:8,border:"1px solid rgba(0,255,136,.15)",marginBottom:14}}><div style={{fontFamily:mono,fontSize:12,color:"#00ff88"}}>No DINGS detected — potential Gem Mint candidate</div></div>)}
+          
+          <div style={{fontFamily:mono,fontSize:10,color:"#555",textTransform:"uppercase",marginBottom:8}}>Defect Previews</div>
+          <DingsPreview frontResult={fR} backResult={bR} frontMaps={fM} backMaps={bM} frontImg={fI} backImg={bI}/>
+        </div>)}
+
+        {/* MAP */}
+        {tab==="map"&&fR&&bR&&(<DingsMap frontResult={fR} backResult={bR}/>)}
+
+        {/* VISION */}
+        {tab==="vision"&&(<div><SurfaceVision maps={fM} label="Front"/><SurfaceVision maps={bM} label="Back"/></div>)}
+
+        {/* CENTERING */}
+        {tab==="centering"&&fR&&bR&&(<div>
+          {[["Front",fR],["Back",bR]].map(([s,r])=>{
+            const maxOff=Math.max(Math.max(r.centering.lrRatio,100-r.centering.lrRatio),Math.max(r.centering.tbRatio,100-r.centering.tbRatio));
+            const hasDing=r.centerDings.length>0;
+            return(<div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${hasDing?"#ff663344":"#1a1c22"}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
+                {hasDing&&<span style={{fontFamily:mono,fontSize:10,color:"#ff6633",fontWeight:600}}>⚠ DING</span>}
+              </div>
+              <div style={{display:"flex",gap:16}}>
+                <div style={{flex:1}}><div style={{fontFamily:mono,fontSize:9,color:"#555",marginBottom:4}}>L / R</div><div style={{fontFamily:mono,fontSize:20,fontWeight:700,color:"#ccc"}}>{r.centering.lrRatio}/{Math.round((100-r.centering.lrRatio)*10)/10}</div></div>
+                <div style={{width:1,background:"#1a1c22"}}/>
+                <div style={{flex:1}}><div style={{fontFamily:mono,fontSize:9,color:"#555",marginBottom:4}}>T / B</div><div style={{fontFamily:mono,fontSize:20,fontWeight:700,color:"#ccc"}}>{r.centering.tbRatio}/{Math.round((100-r.centering.tbRatio)*10)/10}</div></div>
+              </div>
+              <div style={{marginTop:8,fontFamily:mono,fontSize:9,color:"#555"}}>Worst axis: {maxOff.toFixed(1)}/{(100-maxOff).toFixed(1)} · Threshold: {s==="Front"?"55/45":"65/35"}</div>
+            </div>);
+          })}
+        </div>)}
+
+        {/* CORNERS */}
+        {tab==="corners"&&fR&&bR&&(<div>
+          {[["Front",fR],["Back",bR]].map(([s,r])=>(
+            <div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22"}}>
+              <div style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase",marginBottom:10}}>{s} Corners</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {r.corners.details.map(c=>(
+                  <div key={c.name} style={{padding:8,background:"rgba(0,0,0,.3)",borderRadius:6,borderLeft:`2px solid ${c.hasDing?"#ff6633":"#333"}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                      <span style={{fontFamily:mono,fontSize:10,color:c.hasDing?"#ff9944":"#777"}}>{c.name}</span>
+                      {c.hasDing&&<span style={{fontFamily:mono,fontSize:8,color:"#ff6633"}}>DING</span>}
+                    </div>
+                    <div style={{fontFamily:mono,fontSize:9,color:"#555"}}>F:{c.fray} Fi:{c.fill}{c.angle!==undefined?` A:${c.angle}`:""}</div>
+                    <div style={{fontFamily:mono,fontSize:8,color:"#444",marginTop:2}}>W:{c.whiteRatio}% S:{c.sharpness}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>)}
+
+        {/* EDGES */}
+        {tab==="edges"&&fR&&bR&&(<div>
+          {[["Front",fR],["Back",bR]].map(([s,r])=>(
+            <div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22"}}>
+              <div style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase",marginBottom:10}}>{s} Edges</div>
+              {r.edges.details.map(e=>(
+                <div key={e.name} style={{padding:"8px 10px",marginBottom:6,background:"rgba(0,0,0,.3)",borderRadius:6,borderLeft:`2px solid ${e.hasDing?"#ff6633":"#333"}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{fontFamily:mono,fontSize:11,color:e.hasDing?"#ff9944":"#888"}}>{e.name} {e.hasDing&&<span style={{fontSize:8,color:"#ff6633"}}>DING</span>}</span>
+                    <span style={{fontFamily:mono,fontSize:10,color:"#555"}}>F:{e.fray} Fi:{e.fill}</span>
+                  </div>
+                  <div style={{fontFamily:mono,fontSize:8,color:"#444",marginTop:2}}>W:{e.whiteRatio}% R:{e.roughness}</div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>)}
+
+        {/* SURFACE */}
+        {tab==="surface"&&fR&&bR&&(<div>
+          {[["Front",fR],["Back",bR]].map(([s,r])=>{
+            const hasDing=r.surface.dings.length>0;
+            return(<div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${hasDing?"#ff663344":"#1a1c22"}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
+                {hasDing&&<span style={{fontFamily:mono,fontSize:10,color:"#ff6633",fontWeight:600}}>⚠ DING</span>}
+              </div>
+              <div style={{display:"flex",gap:8,marginBottom:10}}>
+                <div style={{flex:1,padding:8,background:"rgba(0,0,0,.3)",borderRadius:6,textAlign:"center"}}><div style={{fontFamily:mono,fontSize:8,color:"#444"}}>ANOMALY</div><div style={{fontFamily:mono,fontSize:16,fontWeight:700,color:r.surface.anomalyRate>4?"#ff6633":r.surface.anomalyRate>1?"#ccbb00":"#00dd77"}}>{r.surface.anomalyRate}%</div></div>
+                <div style={{flex:1,padding:8,background:"rgba(0,0,0,.3)",borderRadius:6,textAlign:"center"}}><div style={{fontFamily:mono,fontSize:8,color:"#444"}}>SCRATCH</div><div style={{fontFamily:mono,fontSize:16,fontWeight:700,color:r.surface.scratchRate>3?"#ff6633":r.surface.scratchRate>1?"#ccbb00":"#00dd77"}}>{r.surface.scratchRate}%</div></div>
+              </div>
+              {hasDing?r.surface.dings.map((d,i)=>(<div key={i} style={{padding:"6px 8px",background:"rgba(255,100,50,.06)",borderRadius:4,marginBottom:4}}><span style={{fontFamily:sans,fontSize:11,color:"#ff9944"}}>⚡ {d.desc}</span></div>)):
+              <div style={{padding:"6px 8px",background:"rgba(0,255,136,.05)",borderRadius:4}}><span style={{fontFamily:sans,fontSize:11,color:"#00dd77"}}>✓ No significant surface defects</span></div>}
+            </div>);
+          })}
+        </div>)}
+      </div>
+    </div>)}
+
+    <div style={{padding:"10px 16px",borderTop:"1px solid #1a1c22",textAlign:"center"}}><div style={{fontFamily:mono,fontSize:8,color:"#333",textTransform:"uppercase",letterSpacing:".15em"}}>Pre-grade estimate · DINGS-based · Not affiliated with TAG</div></div>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  </div>);
+}
