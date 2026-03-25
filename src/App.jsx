@@ -423,7 +423,7 @@ function genMaps(src){return new Promise(async r=>{
   r({original:canvas.toDataURL(),emboss:eC.toDataURL(),highpass:hC.toDataURL(),edges:dC.toDataURL(),width:w,height:h});
 });}
 
-function cropReg(src,rg,mx=220){return new Promise(r=>{const img=new Image();img.crossOrigin="anonymous";img.onload=()=>{const cx=Math.max(0,rg.x),cy=Math.max(0,rg.y),cw=Math.min(rg.w,img.width-cx),ch=Math.min(rg.h,img.height-cy);if(cw<=0||ch<=0){r(null);return;}const sc=Math.min(mx/cw,mx/ch,3);const c=document.createElement("canvas");c.width=~~(cw*sc);c.height=~~(ch*sc);const ctx=c.getContext("2d");ctx.imageSmoothingEnabled=false;ctx.drawImage(img,cx,cy,cw,ch,0,0,c.width,c.height);r(c.toDataURL());};img.src=src;});}
+function cropReg(src,rg,mx=300){return new Promise(r=>{const img=new Image();img.crossOrigin="anonymous";img.onload=()=>{const cx=Math.max(0,rg.x),cy=Math.max(0,rg.y),cw=Math.min(rg.w,img.width-cx),ch=Math.min(rg.h,img.height-cy);if(cw<=0||ch<=0){r(null);return;}const sc=Math.min(mx/cw,mx/ch,4);const c=document.createElement("canvas");c.width=~~(cw*sc);c.height=~~(ch*sc);const ctx=c.getContext("2d");ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";ctx.drawImage(img,cx,cy,cw,ch,0,0,c.width,c.height);r(c.toDataURL("image/png"));};img.src=src;});}
 
 /* ═══════════════════════════════════════════
    FULL ANALYSIS PIPELINE
@@ -586,16 +586,41 @@ function DingsPreview({frontResult,backResult,frontMaps,backMaps,frontImg,backIm
         {c.fray!==undefined&&<div style={{fontFamily:mono,fontSize:9,color:"#555"}}>F:{c.fray} Fi:{c.fill}{c.angle!==undefined?` A:${c.angle}`:""}</div>}
       </div>
       <div style={{display:"flex",gap:1,background:"#111"}}>
-        <div style={{flex:1,position:"relative"}}><img src={c.norm} style={{width:"100%",display:"block",imageRendering:"pixelated"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(255,255,255,.5)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>NORMAL</div></div>
-        {c.enh&&<div style={{flex:1,position:"relative"}}><img src={c.enh} style={{width:"100%",display:"block",imageRendering:"pixelated"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(0,255,136,.7)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>{c.enhLabel}</div></div>}
+        <div style={{flex:1,position:"relative"}}><img src={c.norm} style={{width:"100%",display:"block"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(255,255,255,.5)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>NORMAL</div></div>
+        {c.enh&&<div style={{flex:1,position:"relative"}}><img src={c.enh} style={{width:"100%",display:"block"}}/><div style={{position:"absolute",bottom:4,left:4,fontFamily:mono,fontSize:8,color:"rgba(0,255,136,.7)",background:"rgba(0,0,0,.6)",padding:"2px 5px",borderRadius:3}}>{c.enhLabel}</div></div>}
       </div>
     </div>
   ))}</div>);
 }
 
 /* ═══════════════════════════════════════════
-   CAMERA VIEWFINDER (live level + card guide)
+   CAMERA VIEWFINDER (live level + card guide + live detection)
    ═══════════════════════════════════════════ */
+
+/* Lightweight card detection for live preview (runs on small canvas) */
+function detectCardLive(video, scanW=320) {
+  const vw=video.videoWidth, vh=video.videoHeight;
+  if(!vw||!vh) return null;
+  const scale=scanW/vw, scanH=~~(vh*scale);
+  const c=document.createElement("canvas"); c.width=scanW; c.height=scanH;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.drawImage(video,0,0,scanW,scanH);
+  const data=ctx.getImageData(0,0,scanW,scanH).data;
+  const bounds=findBounds(data,scanW,scanH);
+  if(bounds.cardW<scanW*0.15||bounds.cardH<scanH*0.15) return null;
+  const asp=bounds.cardW/bounds.cardH, idealAsp=2.5/3.5;
+  if(Math.abs(asp-idealAsp)>0.2) return null;
+  // Convert back to video coordinate percentages
+  return {
+    left: (bounds.left/scanW)*100,
+    top: (bounds.top/scanH)*100,
+    width: (bounds.cardW/scanW)*100,
+    height: (bounds.cardH/scanH)*100,
+    fill: (bounds.cardW*bounds.cardH)/(scanW*scanH)*100,
+    aspectOk: Math.abs(asp-idealAsp)<0.12,
+  };
+}
+
 function CameraViewfinder({ side, onCapture, onClose }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -606,7 +631,10 @@ function CameraViewfinder({ side, onCapture, onClose }) {
   const [validating, setValidating] = useState(false);
   const [validation, setValidation] = useState(null);
   const [camError, setCamError] = useState(null);
+  const [cardOutline, setCardOutline] = useState(null);
+  const [cardStable, setCardStable] = useState(0); // frames card has been stable
   const fileRef = useRef(null);
+  const detectRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -623,6 +651,41 @@ function CameraViewfinder({ side, onCapture, onClose }) {
     })();
     return () => { cancelled=true; streamRef.current?.getTracks().forEach(t=>t.stop()); };
   }, []);
+
+  // Live card detection loop
+  useEffect(() => {
+    if (!active || captured) return;
+    let running = true;
+    let stableCount = 0;
+    let lastOutline = null;
+    
+    const detect = () => {
+      if (!running || !videoRef.current) return;
+      try {
+        const result = detectCardLive(videoRef.current);
+        if (result && result.fill > 15 && result.fill < 92) {
+          // Check stability - is outline similar to last frame?
+          if (lastOutline && Math.abs(result.left-lastOutline.left)<3 && Math.abs(result.top-lastOutline.top)<3 && Math.abs(result.width-lastOutline.width)<3) {
+            stableCount = Math.min(stableCount + 1, 15);
+          } else {
+            stableCount = 1;
+          }
+          lastOutline = result;
+          setCardOutline(result);
+          setCardStable(stableCount);
+        } else {
+          stableCount = 0;
+          lastOutline = null;
+          setCardOutline(null);
+          setCardStable(0);
+        }
+      } catch(e) { /* ignore detection errors on live frames */ }
+      if (running) detectRef.current = setTimeout(detect, 350);
+    };
+    
+    detectRef.current = setTimeout(detect, 500);
+    return () => { running=false; clearTimeout(detectRef.current); };
+  }, [active, captured]);
 
   useEffect(() => {
     const handler = e => setTilt({ beta:Math.round((e.beta||0)*10)/10, gamma:Math.round((e.gamma||0)*10)/10 });
@@ -645,6 +708,9 @@ function CameraViewfinder({ side, onCapture, onClose }) {
   const isClose=Math.abs(tilt.beta)<5&&Math.abs(tilt.gamma)<5;
   const lvlColor=isLevel?"#00ff88":isClose?"#ffcc00":"#ff4444";
   const bx=Math.max(-20,Math.min(20,tilt.gamma*2)), by=Math.max(-20,Math.min(20,tilt.beta*2));
+  
+  const cardLocked = cardOutline && cardStable >= 4;
+  const cardFound = cardOutline && cardStable >= 2;
 
   const captureFrame = () => {
     if(!videoRef.current) return;
@@ -657,7 +723,7 @@ function CameraViewfinder({ side, onCapture, onClose }) {
   };
 
   const acceptCapture = () => { streamRef.current?.getTracks().forEach(t=>t.stop()); onCapture(captured); };
-  const retake = () => { setCaptured(null); setValidation(null); };
+  const retake = () => { setCaptured(null); setValidation(null); setCardOutline(null); setCardStable(0); };
   const closeCam = () => { streamRef.current?.getTracks().forEach(t=>t.stop()); onClose(); };
   const handleFile = e => { const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=ev=>{const d=ev.target.result;setCaptured(d);setValidating(true);validateCap(d).then(r=>{setValidation(r);setValidating(false);});}; r.readAsDataURL(f); };
 
@@ -683,15 +749,44 @@ function CameraViewfinder({ side, onCapture, onClose }) {
 
           {active&&(
             <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
-              <defs><mask id="cm"><rect width="100%" height="100%" fill="white"/><rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="black"/></mask></defs>
-              <rect width="100%" height="100%" fill="rgba(0,0,0,.45)" mask="url(#cm)"/>
-              <rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="none" stroke={isLevel?"#00ff8888":"#ffffff44"} strokeWidth="2" strokeDasharray={isLevel?"none":"8,6"}/>
-              <line x1="49%" y1="50%" x2="51%" y2="50%" stroke="rgba(255,255,255,.3)" strokeWidth="1"/>
-              <line x1="50%" y1="49%" x2="50%" y2="51%" stroke="rgba(255,255,255,.3)" strokeWidth="1"/>
-              <text x="50%" y="9%" textAnchor="middle" fill="rgba(255,255,255,.5)" fontSize="11" fontFamily={mono}>ALIGN CARD WITHIN GUIDE</text>
+              {/* Dim overlay with cutout - use detected card or static guide */}
+              {cardFound ? (<>
+                {/* Live detected card outline */}
+                <defs><mask id="cm"><rect width="100%" height="100%" fill="white"/><rect x={`${cardOutline.left}%`} y={`${cardOutline.top}%`} width={`${cardOutline.width}%`} height={`${cardOutline.height}%`} rx="6" fill="black"/></mask></defs>
+                <rect width="100%" height="100%" fill="rgba(0,0,0,.5)" mask="url(#cm)"/>
+                <rect x={`${cardOutline.left}%`} y={`${cardOutline.top}%`} width={`${cardOutline.width}%`} height={`${cardOutline.height}%`} rx="6"
+                  fill="none" stroke={cardLocked?"#00ff88":"#ffcc00"} strokeWidth={cardLocked?"2.5":"1.5"}
+                  style={{transition:"all .2s ease"}} />
+                {/* Corner brackets on detected card */}
+                {[[0,0,1,0,0,1],[1,0,-1,0,0,1],[0,1,1,0,0,-1],[1,1,-1,0,0,-1]].map(([cx,cy,dx,_,__,dy],i)=>{
+                  const px=cardOutline.left+cx*cardOutline.width;
+                  const py=cardOutline.top+cy*cardOutline.height;
+                  return(<g key={i}>
+                    <line x1={`${px}%`} y1={`${py}%`} x2={`${px+dx*3}%`} y2={`${py}%`} stroke={cardLocked?"#00ff88":"#ffcc00"} strokeWidth="3"/>
+                    <line x1={`${px}%`} y1={`${py}%`} x2={`${px}%`} y2={`${py+dy*3}%`} stroke={cardLocked?"#00ff88":"#ffcc00"} strokeWidth="3"/>
+                  </g>);
+                })}
+              </>):(<>
+                {/* Static guide when no card detected */}
+                <defs><mask id="cm"><rect width="100%" height="100%" fill="white"/><rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="black"/></mask></defs>
+                <rect width="100%" height="100%" fill="rgba(0,0,0,.45)" mask="url(#cm)"/>
+                <rect x="15%" y="12%" width="70%" height="76%" rx="8" fill="none" stroke="#ffffff33" strokeWidth="1.5" strokeDasharray="8,6"/>
+              </>)}
+              {/* Center crosshair */}
+              <line x1="49%" y1="50%" x2="51%" y2="50%" stroke="rgba(255,255,255,.2)" strokeWidth="1"/>
+              <line x1="50%" y1="49%" x2="50%" y2="51%" stroke="rgba(255,255,255,.2)" strokeWidth="1"/>
+              {/* Status text */}
+              <text x="50%" y="7%" textAnchor="middle" fill={cardLocked?"#00ff88":cardFound?"#ffcc00":"rgba(255,255,255,.4)"} fontSize="11" fontFamily={mono}>
+                {cardLocked?"✓ CARD LOCKED — READY TO SNAP":cardFound?"CARD DETECTED — HOLD STEADY":"ALIGN CARD WITHIN FRAME"}
+              </text>
+              {/* Fill percentage */}
+              {cardFound&&<text x="50%" y="95%" textAnchor="middle" fill="#00ff8888" fontSize="10" fontFamily={mono}>
+                {Math.round(cardOutline.fill)}% fill
+              </text>}
             </svg>
           )}
 
+          {/* Bubble level */}
           {orientPerm==="granted"&&active&&(
             <div style={{position:"absolute",bottom:100,left:"50%",transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
               <div style={{width:56,height:56,borderRadius:"50%",border:`2px solid ${lvlColor}44`,background:"rgba(0,0,0,.5)",position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
@@ -730,8 +825,9 @@ function CameraViewfinder({ side, onCapture, onClose }) {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
           </button>
           <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:"none"}}/>
-          <button onClick={captureFrame} disabled={!active&&!camError} style={{width:68,height:68,borderRadius:"50%",background:"transparent",border:`4px solid ${active?"#fff":"#444"}`,cursor:active?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center"}}>
-            <div style={{width:56,height:56,borderRadius:"50%",background:active?"#fff":"#333",transition:"all .2s"}}/>
+          {/* Shutter button - changes color when card locked */}
+          <button onClick={captureFrame} disabled={!active&&!camError} style={{width:68,height:68,borderRadius:"50%",background:"transparent",border:`4px solid ${cardLocked?"#00ff88":active?"#fff":"#444"}`,cursor:active?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",transition:"border-color .3s"}}>
+            <div style={{width:56,height:56,borderRadius:"50%",background:cardLocked?"#00ff88":active?"#fff":"#333",transition:"all .3s"}}/>
           </button>
           <div style={{width:40}}/>
         </>):(<>
