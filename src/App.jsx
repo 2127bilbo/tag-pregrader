@@ -407,6 +407,8 @@ function loadTrainingBounds(isHolo, imgW, imgH) {
 }
 
 
+/* ═══════════════════════════════════════════
+   DINGS-BASED SCORING ENGINE
    Calibrated against real TAG DIG reports:
    Grade 10: 0 DINGS
    Grade 9:  1 DING (centering only)
