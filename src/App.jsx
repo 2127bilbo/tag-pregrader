@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 /* ═══════════════════════════════════════════
-   TAG PRE-GRADER v2.4
+   TAG PRE-GRADER v2.5
    DINGS-Based Scoring Engine + Manual Boundary Editor
    Calibrated against 6 real TAG DIG reports
    ═══════════════════════════════════════════ */
@@ -135,14 +135,33 @@ function detectCornerDings(d, w, h, bn, side) {
   
   const dings = [];
   const details = [];
-  
+
+  // Sample the card border color from a safe mid-edge region to know what the border looks like
+  // This lets us detect wear on dark-bordered WOTC cards (blue/black border, not just white)
+  const edgeSamples = 12;
+  let borderR=0, borderG=0, borderB=0;
+  for(let i=0; i<edgeSamples; i++){
+    const ex = Math.min(w-1, cl + Math.round(cW*0.25 + i*(cW*0.5/edgeSamples)));
+    const ey = Math.min(h-1, ct + Math.round(cH*0.03));
+    const [pr,pg,pb] = PX(d,w,ex,ey);
+    borderR+=pr; borderG+=pg; borderB+=pb;
+  }
+  borderR=borderR/edgeSamples; borderG=borderG/edgeSamples; borderB=borderB/edgeSamples;
+  const borderLum = LUM(borderR,borderG,borderB);
+  const isDarkBorder = borderLum < 80; // WOTC-era cards have dark blue/black borders
+
   for (const { name, x:cx, y:cy } of corners) {
-    let whitePixels=0, totalPixels=0, sharpness=0, gradCount=0;
+    let whitePixels=0, colorDevPixels=0, totalPixels=0, sharpness=0, gradCount=0;
     
     for (let dy=0; dy<cs; dy++) for (let dx=0; dx<cs; dx++) {
       const X=Math.min(w-1,Math.max(0,cx+dx)), Y=Math.min(h-1,Math.max(0,cy+dy));
       const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); totalPixels++;
       if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) whitePixels++;
+      // For dark-bordered cards: also detect significant color deviation from expected border
+      if(isDarkBorder){
+        const colorDiff = Math.abs(r-borderR)+Math.abs(g-borderG)+Math.abs(b-borderB);
+        if(colorDiff > 60 && l > borderLum+40) colorDevPixels++; // lighter than expected = wear
+      }
       if(dx<cs-1 && dy<cs-1){
         const gx=Math.abs(LUM(...PX(d,w,Math.min(w-1,X+1),Y))-l);
         const gy=Math.abs(LUM(...PX(d,w,X,Math.min(h-1,Y+1)))-l);
@@ -151,13 +170,17 @@ function detectCornerDings(d, w, h, bn, side) {
     }
     
     const whiteRatio = totalPixels>0 ? whitePixels/totalPixels : 0;
+    const colorDevRatio = totalPixels>0 ? colorDevPixels/totalPixels : 0;
     const avgSharp = gradCount>0 ? sharpness/gradCount : 0;
+    
+    // Combined wear signal: white pixels OR color deviation on dark-border cards
+    const effectiveWearRatio = isDarkBorder ? Math.max(whiteRatio, colorDevRatio*0.7) : whiteRatio;
     
     // Fray/Fill/Angle scoring (TAG-style supplementary metrics)
     let fray = 1000, fill = 1000, angle = 1000;
-    if (whiteRatio > 0.30) { fray -= 20; fill -= 25; }
-    else if (whiteRatio > 0.15) { fray -= 10; fill -= 12; }
-    else if (whiteRatio > 0.05) { fray -= 3; fill -= 5; }
+    if (effectiveWearRatio > 0.30) { fray -= 20; fill -= 25; }
+    else if (effectiveWearRatio > 0.15) { fray -= 10; fill -= 12; }
+    else if (effectiveWearRatio > 0.05) { fray -= 3; fill -= 5; }
     if (avgSharp < 5) angle -= 8;
     else if (avgSharp < 8) angle -= 4;
     else if (avgSharp < 12) angle -= 2;
@@ -165,18 +188,18 @@ function detectCornerDings(d, w, h, bn, side) {
     const sideLabel = side === "front" ? "FRONT" : "BACK";
     
     // DING threshold — visible wear that impacts grade
-    const hasWear = whiteRatio > 0.12 || avgSharp < 4;
+    const hasWear = effectiveWearRatio > 0.10 || avgSharp < 4;
     if (hasWear) {
       dings.push({
         side: sideLabel,
         type: "CORNER WEAR",
         location: `${sideLabel} / ${name}`,
-        severity: whiteRatio > 0.25 ? 3 : whiteRatio > 0.15 ? 2 : 1,
-        desc: whiteRatio > 0.25 ? "Significant corner whitening" : whiteRatio > 0.15 ? "Corner wear with whitening" : "Light corner wear",
+        severity: effectiveWearRatio > 0.25 ? 3 : effectiveWearRatio > 0.15 ? 2 : 1,
+        desc: effectiveWearRatio > 0.25 ? "Significant corner wear" : effectiveWearRatio > 0.15 ? "Corner wear visible" : "Light corner wear",
       });
     }
     
-    details.push({ name, fray, fill, angle: side==="front" ? angle : undefined, whiteRatio: Math.round(whiteRatio*1000)/10, sharpness: Math.round(avgSharp*10)/10, hasDing: hasWear, cropX:cx, cropY:cy, cropSize:cs });
+    details.push({ name, fray, fill, angle: side==="front" ? angle : undefined, whiteRatio: Math.round(effectiveWearRatio*1000)/10, sharpness: Math.round(avgSharp*10)/10, hasDing: hasWear, cropX:cx, cropY:cy, cropSize:cs });
   }
   
   return { dings, details };
@@ -286,10 +309,22 @@ function detectSurfaceDings(d, w, h, bn, side) {
   
   // Holo/foil detection: check if image has high global variance (holo shimmer)
   const isHolo = gVar > 800;
-  const diffThreshHigh = isHolo ? 35 : 25; // Was 18 — way too sensitive
-  const diffThreshLow = isHolo ? 22 : 15;  // Was 10
-  const varMultiplier = isHolo ? 3.5 : 2.8; // Was 2.2
-  const varFloor = isHolo ? 400 : 250;      // Was 150
+  // Card back detection: the standard Pokemon card back (pokeball design) has very high
+  // cell-to-cell variance from the design itself. Detect by checking if it's a back AND
+  // has high structured variance (not random like play wear, but organized like design).
+  // We use the side label + variance pattern to detect.
+  const isBack = side === 'back';
+  // High-design card back: high global variance but not a holo front
+  const isHighDesignBack = isBack && gVar > 400;
+  
+  // Set thresholds — high-design backs get much higher thresholds since pokeball/logo
+  // create massive cell variance that has nothing to do with surface wear
+  const baseHigh = isHolo ? 35 : 25;
+  const baseLow  = isHolo ? 22 : 15;
+  const diffThreshHigh = isHighDesignBack ? 55 : baseHigh;
+  const diffThreshLow  = isHighDesignBack ? 38 : baseLow;
+  const varMultiplier  = isHolo ? 3.5 : isHighDesignBack ? 4.5 : 2.8;
+  const varFloor       = isHolo ? 400 : isHighDesignBack ? 600 : 250;
   
   for(let gy=1;gy<gY-1;gy++) for(let gx=1;gx<gX-1;gx++){
     totalCells++;
@@ -306,10 +341,19 @@ function detectSurfaceDings(d, w, h, bn, side) {
   const anomRate = totalCells>0 ? anomCount/totalCells : 0;
   const scratchRate = totalCells>0 ? scratchCount/totalCells : 0;
   
-  // Classify as DINGS — holo cards get much higher thresholds because foil shimmer
-  // creates legitimate neighbor cell variance that isn't play wear
-  if (isHolo) {
-    // Holo: only flag severe/obvious damage. Foil shimmer is not a defect.
+  // Classify as DINGS — card backs with high-design artwork get very high thresholds
+  // Holo fronts get elevated thresholds. Standard fronts get base thresholds.
+  if (isHighDesignBack) {
+    // Card back: pokeball/logo design creates massive false variance. Only flag obvious damage.
+    if (anomRate > 0.45 || scratchRate > 0.35) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
+    } else if (anomRate > 0.30 || scratchRate > 0.22) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:2, desc:"Surface wear visible" });
+    } else if (anomRate > 0.20 || scratchRate > 0.14) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:1, desc:"Minor surface imperfection" });
+    }
+  } else if (isHolo) {
+    // Holo front: only flag severe/obvious damage
     if (anomRate > 0.35 || scratchRate > 0.28) {
       dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
     } else if (anomRate > 0.22 || scratchRate > 0.18) {
@@ -318,7 +362,7 @@ function detectSurfaceDings(d, w, h, bn, side) {
       dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:1, desc:"Minor surface imperfection" });
     }
   } else {
-    // Non-holo: standard thresholds
+    // Standard non-holo front
     if (anomRate > 0.15 || scratchRate > 0.12) {
       dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
     } else if (anomRate > 0.08 || scratchRate > 0.06) {
@@ -443,26 +487,32 @@ function computeGrade(frontDings, backDings, frontCenter, backCenter) {
   // ~14 (4 dings with front surface) → 631 (EX-MT 6)
   // ~22 (6 dings, front+back surface) → 540 (EX 5)
   
+  // Score curve — anchored to 6 real TAG DIG reports:
+  // w=0    → 970 (Gem Mint 10)
+  // w≈1.8  → 913 (Mint 9, centering only)
+  // w≈5.4  → 825 (NM-MT 8, 4 back-only)
+  // w≈13.9 → 637 (EX-MT 6, 1 front surface + 3 back)
+  // w≈20   → 555 (EX 5, front+back surface + 4 back)
+  
   let tagScore;
   if (weightedScore === 0) {
-    // Check centering closeness for 10 vs Pristine 10
     const fMaxOff = Math.max(Math.max(frontCenter.lrRatio,100-frontCenter.lrRatio), Math.max(frontCenter.tbRatio,100-frontCenter.tbRatio));
     const bMaxOff = Math.max(Math.max(backCenter.lrRatio,100-backCenter.lrRatio), Math.max(backCenter.tbRatio,100-backCenter.tbRatio));
-    if (fMaxOff <= 51 && bMaxOff <= 52) tagScore = 995; // Pristine
+    if (fMaxOff <= 51 && bMaxOff <= 52) tagScore = 995;
     else if (fMaxOff <= 53 && bMaxOff <= 55) tagScore = 975;
     else tagScore = 960;
   } else if (weightedScore <= 2) {
     tagScore = Math.round(940 - weightedScore * 15);
-  } else if (weightedScore <= 5) {
+  } else if (weightedScore <= 6) {
     tagScore = Math.round(910 - (weightedScore - 2) * 25);
-  } else if (weightedScore <= 10) {
-    tagScore = Math.round(835 - (weightedScore - 5) * 18);
-  } else if (weightedScore <= 18) {
-    tagScore = Math.round(745 - (weightedScore - 10) * 13);
-  } else if (weightedScore <= 28) {
-    tagScore = Math.round(640 - (weightedScore - 18) * 12);
+  } else if (weightedScore <= 14) {
+    tagScore = Math.round(810 - (weightedScore - 6) * 22);
+  } else if (weightedScore <= 22) {
+    tagScore = Math.round(634 - (weightedScore - 14) * 13);
+  } else if (weightedScore <= 32) {
+    tagScore = Math.round(530 - (weightedScore - 22) * 10);
   } else {
-    tagScore = Math.max(300, Math.round(520 - (weightedScore - 28) * 8));
+    tagScore = Math.max(300, Math.round(430 - (weightedScore - 32) * 7));
   }
   
   return {
@@ -506,8 +556,9 @@ function cropReg(src,rg,mx=300){return new Promise(r=>{const img=new Image();img
    FULL ANALYSIS PIPELINE
    ═══════════════════════════════════════════ */
 async function analyzeCardFull(src, side, overrideBounds = null, overrideCentering = null) {
-  const { w, h, data } = await loadImg(src);
+  const { w, h, data, canvas } = await loadImg(src);
   const d = data.data;
+  const scaledImgUrl = canvas.toDataURL('image/jpeg', 0.92);
   const bounds = overrideBounds
     ? { ...overrideBounds, cardW: overrideBounds.right - overrideBounds.left, cardH: overrideBounds.bottom - overrideBounds.top }
     : findBounds(d, w, h);
@@ -529,6 +580,7 @@ async function analyzeCardFull(src, side, overrideBounds = null, overrideCenteri
     bounds,
     imgW: w,
     imgH: h,
+    scaledImgUrl,
   };
 }
 
@@ -811,6 +863,7 @@ function DingsMap({ frontResult, backResult }) {
 /* DING Location Overlay — shows card image with DING regions highlighted */
 function DingLocationOverlay({image, result, label}){
   if(!image||!result)return null;
+  const displayImg = result.scaledImgUrl || image;
   const imgW=result.imgW||1400, imgH=result.imgH||1960;
 
   // Collect all detectable DING regions in analysis coordinate space
@@ -838,7 +891,7 @@ function DingLocationOverlay({image, result, label}){
         <span style={{fontFamily:mono,fontSize:9,color:hasDings?"#ff6633":"#00ff88"}}>{hasDings?`${regions.length} region${regions.length!==1?"s":""} flagged`:"Clean"}</span>
       </div>
       <div style={{position:"relative",lineHeight:0}}>
-        <img src={image} style={{width:"100%",display:"block"}}/>
+        <img src={displayImg} style={{width:"100%",display:"block"}}/>
         <svg viewBox={`0 0 ${imgW} ${imgH}`} style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none"}}>
           {regions.map((rg,i)=>(
             <g key={i}>
@@ -861,7 +914,7 @@ function DingLocationOverlay({image, result, label}){
 function DingsPreview({frontResult,backResult,frontMaps,backMaps,frontImg,backImg}){
   const[crops,setCrops]=useState([]),[loading,setLoading]=useState(true);
   useEffect(()=>{(async()=>{setLoading(true);const all=[];
-    for(const[sLabel,result,img,maps]of[["Front",frontResult,frontImg,frontMaps],["Back",backResult,backImg,backMaps]]){
+    for(const[sLabel,result,img,maps]of[["Front",frontResult,frontResult?.scaledImgUrl||frontImg,frontMaps],["Back",backResult,backResult?.scaledImgUrl||backImg,backMaps]]){
       if(!result||!img)continue;
       for(const c of result.corners.details){if(!c.hasDing)continue;const rg={x:c.cropX,y:c.cropY,w:c.cropSize,h:c.cropSize};
         const norm=await cropReg(img,rg);const enh=maps?.emboss?await cropReg(maps.emboss,rg):null;
@@ -992,18 +1045,20 @@ function ManualBoundaryEditor({ image, result, side, onApply }) {
     setInner(autoInner);
   };
 
-  // Handle pill dimensions (scale with card size so they're always tappable)
+  // Handle pill dimensions
   const pH = Math.max(52, cH*0.055), pW = Math.max(140, cW*0.22);
-  const pHv = Math.max(52, cW*0.055), pWv = Math.max(140, cH*0.22); // vertical handles
+  const pHv = Math.max(52, cW*0.055), pWv = Math.max(140, cH*0.22);
   const lw = Math.max(3, cW*0.005);
-  const pad = 50; // invisible touch area padding
+  const pad = 50;
+  // Outer handles pushed OUTSIDE the card rect so they never overlap inner handles
+  const outerOffset = Math.max(pH*0.6, cH*0.04);
 
-  // Handles config: [x, y, which, isOuter, isHoriz]
+  // [x, y, which, isOuter, isHoriz]
   const handles = [
-    [(outer.left+outer.right)/2, outer.top,    'OT', true,  true],
-    [(outer.left+outer.right)/2, outer.bottom,  'OB', true,  true],
-    [outer.left,  (outer.top+outer.bottom)/2,   'OL', true,  false],
-    [outer.right, (outer.top+outer.bottom)/2,   'OR', true,  false],
+    [(outer.left+outer.right)/2, outer.top - outerOffset,    'OT', true,  true],
+    [(outer.left+outer.right)/2, outer.bottom + outerOffset,  'OB', true,  true],
+    [outer.left - outerOffset,   (outer.top+outer.bottom)/2,  'OL', true,  false],
+    [outer.right + outerOffset,  (outer.top+outer.bottom)/2,  'OR', true,  false],
     [(inner.left+inner.right)/2, inner.top,    'IT', false, true],
     [(inner.left+inner.right)/2, inner.bottom,  'IB', false, true],
     [inner.left,  (inner.top+inner.bottom)/2,   'IL', false, false],
@@ -1046,11 +1101,13 @@ function ManualBoundaryEditor({ image, result, side, onApply }) {
         </div>
         <span style={{fontFamily:mono,fontSize:9,color:'#444',marginLeft:'auto'}}>Drag handles</span>
       </div>
-      {/* Image + drag canvas */}
-      <div style={{position:'relative',lineHeight:0}}>
+      {/* Image + drag canvas — touch-action:none prevents iOS scroll hijack during drag */}
+      <div style={{position:'relative',lineHeight:0,touchAction:'none'}}
+           onTouchMove={e=>{if(dragging.current)e.preventDefault();}}
+           onTouchStart={e=>{if(dragging.current)e.preventDefault();}}>
         <img src={image} style={{width:'100%',display:'block'}} draggable={false}/>
         <svg ref={svgRef} viewBox={`0 0 ${imgW} ${imgH}`}
-             style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',overflow:'visible'}}>
+             style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',overflow:'visible',touchAction:'none'}}>
           {/* Outer boundary */}
           <rect x={outer.left} y={outer.top} width={cW} height={cH}
             fill="none" stroke="#ff9944" strokeWidth={lw} opacity={0.85}/>
@@ -1065,6 +1122,11 @@ function ManualBoundaryEditor({ image, result, side, onApply }) {
           <rect x={inner.left} y={inner.top} width={inner.right-inner.left} height={inner.bottom-inner.top}
             fill="none" stroke="#00ff88" strokeWidth={Math.max(2,lw*0.8)}
             strokeDasharray={`${cW*0.025},${cW*0.012}`} opacity={0.8}/>
+          {/* Connector lines from outer handles to card rect edge — makes it clear what they control */}
+          <line x1={(outer.left+outer.right)/2} y1={outer.top} x2={(outer.left+outer.right)/2} y2={outer.top-outerOffset+pH/2} stroke="#ff994466" strokeWidth={lw*0.6} strokeDasharray="8,6"/>
+          <line x1={(outer.left+outer.right)/2} y1={outer.bottom} x2={(outer.left+outer.right)/2} y2={outer.bottom+outerOffset-pH/2} stroke="#ff994466" strokeWidth={lw*0.6} strokeDasharray="8,6"/>
+          <line x1={outer.left} y1={(outer.top+outer.bottom)/2} x2={outer.left-outerOffset+pHv/2} y2={(outer.top+outer.bottom)/2} stroke="#ff994466" strokeWidth={lw*0.6} strokeDasharray="8,6"/>
+          <line x1={outer.right} y1={(outer.top+outer.bottom)/2} x2={outer.right+outerOffset-pHv/2} y2={(outer.top+outer.bottom)/2} stroke="#ff994466" strokeWidth={lw*0.6} strokeDasharray="8,6"/>
           {/* 8 drag handles */}
           {handles.map(([hx,hy,which,isOuter,isHoriz])=>{
             const color = isOuter ? '#ff9944' : '#00ff88';
@@ -1439,7 +1501,7 @@ export default function TAGPreGrader(){
     <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1c22",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:"#0a0b0e"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#00ff88,#0088ff)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:900,fontSize:13,color:"#000"}}>TG</div>
-        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.4 — DINGS-Based Engine</div></div>
+        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.5 — DINGS-Based Engine</div></div>
       </div>
       {step===2&&<button onClick={reset} style={{background:"transparent",border:"1px solid #2a2d35",borderRadius:6,color:"#666",fontFamily:mono,fontSize:10,padding:"5px 10px",cursor:"pointer",textTransform:"uppercase"}}>New</button>}
     </div>
@@ -1452,7 +1514,7 @@ export default function TAGPreGrader(){
       </div>
       <button onClick={run} disabled={!fI||!bI} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:fI&&bI?"linear-gradient(135deg,#00ff88,#0088ff)":"#1a1c22",color:fI&&bI?"#000":"#444",fontFamily:mono,fontSize:13,fontWeight:700,cursor:fI&&bI?"pointer":"default",textTransform:"uppercase",letterSpacing:".08em",transition:"all .3s"}}>{fI&&bI?"▶  Analyze Card":"Capture both sides"}</button>
       <div style={{marginTop:16,padding:14,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22"}}>
-        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.4 — DINGS-Based Scoring</div>
+        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.5 — DINGS-Based Scoring</div>
         <div style={{fontSize:12,color:"#666",lineHeight:1.7}}>
           Scoring engine rebuilt around <span style={{color:"#ff9944"}}>DINGS detection</span> — the same defect classification system TAG uses.
           Calibrated against 6 real TAG DIG reports spanning grades 5 through Gem Mint 10.
