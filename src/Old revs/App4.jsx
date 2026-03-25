@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 /* ═══════════════════════════════════════════
-   TAG PRE-GRADER v2.6
+   TAG PRE-GRADER v2.5
    DINGS-Based Scoring Engine + Manual Boundary Editor
    Calibrated against 6 real TAG DIG reports
    ═══════════════════════════════════════════ */
@@ -28,130 +28,28 @@ const PX=(d,w,x,y)=>{const i=(y*w+x)*4;return[d[i],d[i+1],d[i+2]];};
 const LUM=(r,g,b)=>.299*r+.587*g+.114*b;
 
 /* ═══════════════════════════════════════════
-   CARD DETECTION v2.6 — Grid-variance method
-   Works on white, black, orange, any background.
-   Strategy:
-   1. Divide image into grid, compute variance per cell
-   2. Cells above variance floor = card content
-   3. Bounding box of card cells = card rectangle
-   4. Refine edges using local contrast at found boundary
-   5. Sanity-check aspect ratio (2.5:3.5 ± tolerance)
-   6. Fall back to edge-scan if grid method fails
+   CARD DETECTION (improved thresholds)
    ═══════════════════════════════════════════ */
-function findBounds(d, w, h) {
-  const GX = 32, GY = 32;
-  const cellW = Math.floor(w / GX), cellH = Math.floor(h / GY);
-
-  // Step 1: Compute variance per grid cell
-  const varGrid = [];
-  for (let gy = 0; gy < GY; gy++) {
-    varGrid[gy] = [];
-    for (let gx = 0; gx < GX; gx++) {
-      let sum = 0, sq = 0, n = 0;
-      const x0 = gx * cellW, y0 = gy * cellH;
-      const step = Math.max(1, Math.floor(cellW / 6));
-      for (let y = y0; y < y0 + cellH && y < h; y += step) {
-        for (let x = x0; x < x0 + cellW && x < w; x += step) {
-          const v = LUM(...PX(d, w, x, y)); sum += v; sq += v*v; n++;
-        }
-      }
-      varGrid[gy][gx] = n > 0 ? (sq/n - (sum/n)**2) : 0;
-    }
-  }
-
-  // Step 2: Adaptive variance floor — relative to image content
-  // Sort variances, use 70th percentile as "high variance" anchor
-  const allVars = varGrid.flat().sort((a,b) => a-b);
-  const p70 = allVars[Math.floor(allVars.length * 0.70)];
-  const p30 = allVars[Math.floor(allVars.length * 0.30)];
-  // Floor = halfway between low and high content variance
-  // This adapts to both busy backgrounds and plain backgrounds
-  const varFloor = Math.max(20, p30 + (p70 - p30) * 0.4);
-
-  // Step 3: Find bounding box of high-variance cells
-  let minGX = GX, maxGX = 0, minGY = GY, maxGY = 0, cardCells = 0;
-  for (let gy = 0; gy < GY; gy++) {
-    for (let gx = 0; gx < GX; gx++) {
-      if (varGrid[gy][gx] > varFloor) {
-        minGX = Math.min(minGX, gx); maxGX = Math.max(maxGX, gx);
-        minGY = Math.min(minGY, gy); maxGY = Math.max(maxGY, gy);
-        cardCells++;
-      }
-    }
-  }
-
-  // Need at least 10% of cells to be "card"
-  const gridResult = cardCells >= (GX * GY * 0.10) && maxGX > minGX && maxGY > minGY;
-
-  if (gridResult) {
-    // Convert grid coords to pixel coords (with small inset padding)
-    let left   = minGX * cellW;
-    let right  = (maxGX + 1) * cellW;
-    let top    = minGY * cellH;
-    let bottom = (maxGY + 1) * cellH;
-
-    // Step 4: Refine each edge — scan inward from grid bound to find exact contrast edge
-    const refineEdge = (axis, start, end, fixed1, fixed2, dir) => {
-      // axis: 'x' or 'y', dir: 1=inward from low side, -1=inward from high side
-      const samples = 12;
-      const range = Math.abs(end - start);
-      const step = Math.max(1, Math.floor(range * 0.015));
-      const scanRange = Math.min(~~(range * 0.12), 40);
-      let bestEdge = start;
-      let bestContrast = 0;
-      for (let i = 0; i < scanRange; i++) {
-        const pos = start + dir * i;
-        if (pos < 0 || pos >= (axis === 'x' ? w : h)) break;
-        let contrast = 0;
-        for (let s = 0; s < samples; s++) {
-          const frac = (s + 0.5) / samples;
-          const fixedPos = Math.round(fixed1 + frac * (fixed2 - fixed1));
-          const p1 = axis === 'x'
-            ? LUM(...PX(d, w, Math.min(w-1, pos - dir), Math.min(h-1, fixedPos)))
-            : LUM(...PX(d, w, Math.min(w-1, fixedPos), Math.min(h-1, pos - dir)));
-          const p2 = axis === 'x'
-            ? LUM(...PX(d, w, Math.min(w-1, pos), Math.min(h-1, fixedPos)))
-            : LUM(...PX(d, w, Math.min(w-1, fixedPos), Math.min(h-1, pos)));
-          contrast += Math.abs(p2 - p1);
-        }
-        if (contrast > bestContrast) { bestContrast = contrast; bestEdge = pos; }
-      }
-      return bestEdge;
-    };
-
-    left   = refineEdge('x', left,   right,  top,  bottom, 1);
-    right  = refineEdge('x', right,  left,   top,  bottom, -1);
-    top    = refineEdge('y', top,    bottom, left, right,  1);
-    bottom = refineEdge('y', bottom, top,    left, right,  -1);
-
-    const cardW = right - left, cardH = bottom - top;
-
-    // Step 5: Aspect ratio sanity check (2.5:3.5 = 0.714, allow ±0.18)
-    if (cardW > w * 0.10 && cardH > h * 0.10) {
-      const asp = cardW / cardH;
-      if (asp > 0.53 && asp < 0.90) {
-        return { left, right, top, bottom, cardW, cardH };
-      }
-      // Aspect ratio off but bounds are reasonable — return with clamped dims
-      if (cardW > w * 0.15 && cardH > h * 0.15) {
-        return { left, right, top, bottom, cardW, cardH };
-      }
-    }
-  }
-
-  // Step 6: Fallback — original edge-scan method (works when card fills most of frame)
+function findBounds(d,w,h){
+  // Multi-threshold scan for robustness with phone photos
   const thresholds = [15, 25, 40, 60];
   let best = null, bestArea = 0;
+  
   for (const t of thresholds) {
     let l=0, r=w-1, tp=0, b=h-1;
     const rowVar = (y,x1,x2) => { let s=0,q=0,n=0; const st=Math.max(1,~~((x2-x1)/60)); for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,Math.min(w-1,x),y));s+=v;q+=v*v;n++;} return n>0?q/n-(s/n)**2:0; };
     const colVar = (x,y1,y2) => { let s=0,q=0,n=0; const st=Math.max(1,~~((y2-y1)/60)); for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,x,Math.min(h-1,y)));s+=v;q+=v*v;n++;} return n>0?q/n-(s/n)**2:0; };
-    for(let x=0;x<w*.4;x++) if(colVar(x,~~(h*.1),~~(h*.9))>t){l=x;break;}
-    for(let x=w-1;x>w*.6;x--) if(colVar(x,~~(h*.1),~~(h*.9))>t){r=x;break;}
-    for(let y=0;y<h*.4;y++) if(rowVar(y,~~(w*.1),~~(w*.9))>t){tp=y;break;}
-    for(let y=h-1;y>h*.6;y--) if(rowVar(y,~~(w*.1),~~(w*.9))>t){b=y;break;}
-    const area=(r-l)*(b-tp);
-    if(area>bestArea&&(r-l)>w*0.15&&(b-tp)>h*0.15){bestArea=area;best={left:l,right:r,top:tp,bottom:b,cardW:r-l,cardH:b-tp};}
+    
+    for(let x=0;x<w*.35;x++) if(colVar(x,~~(h*.15),~~(h*.85))>t){l=x;break;}
+    for(let x=w-1;x>w*.65;x--) if(colVar(x,~~(h*.15),~~(h*.85))>t){r=x;break;}
+    for(let y=0;y<h*.35;y++) if(rowVar(y,~~(w*.15),~~(w*.85))>t){tp=y;break;}
+    for(let y=h-1;y>h*.65;y--) if(rowVar(y,~~(w*.15),~~(w*.85))>t){b=y;break;}
+    
+    const area = (r-l)*(b-tp);
+    if (area > bestArea && (r-l) > w*0.2 && (b-tp) > h*0.2) {
+      bestArea = area;
+      best = { left:l, right:r, top:tp, bottom:b, cardW:r-l, cardH:b-tp };
+    }
   }
   return best || { left:0, right:w-1, top:0, bottom:h-1, cardW:w-1, cardH:h-1 };
 }
@@ -1290,10 +1188,10 @@ function detectCardLive(video, scanW=320) {
   ctx.drawImage(video,0,0,scanW,scanH);
   const data=ctx.getImageData(0,0,scanW,scanH).data;
   const bounds=findBounds(data,scanW,scanH);
-  if(bounds.cardW<scanW*0.12||bounds.cardH<scanH*0.12) return null;
+  if(bounds.cardW<scanW*0.15||bounds.cardH<scanH*0.15) return null;
   const asp=bounds.cardW/bounds.cardH, idealAsp=2.5/3.5;
-  // Relaxed from 0.2 to 0.25 — handles slight tilt without dropping detection
-  if(Math.abs(asp-idealAsp)>0.25) return null;
+  if(Math.abs(asp-idealAsp)>0.2) return null;
+  // Convert back to video coordinate percentages
   return {
     left: (bounds.left/scanW)*100,
     top: (bounds.top/scanH)*100,
@@ -1603,7 +1501,7 @@ export default function TAGPreGrader(){
     <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1c22",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:"#0a0b0e"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#00ff88,#0088ff)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:900,fontSize:13,color:"#000"}}>TG</div>
-        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.6 — DINGS-Based Engine</div></div>
+        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.5 — DINGS-Based Engine</div></div>
       </div>
       {step===2&&<button onClick={reset} style={{background:"transparent",border:"1px solid #2a2d35",borderRadius:6,color:"#666",fontFamily:mono,fontSize:10,padding:"5px 10px",cursor:"pointer",textTransform:"uppercase"}}>New</button>}
     </div>
@@ -1616,7 +1514,7 @@ export default function TAGPreGrader(){
       </div>
       <button onClick={run} disabled={!fI||!bI} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:fI&&bI?"linear-gradient(135deg,#00ff88,#0088ff)":"#1a1c22",color:fI&&bI?"#000":"#444",fontFamily:mono,fontSize:13,fontWeight:700,cursor:fI&&bI?"pointer":"default",textTransform:"uppercase",letterSpacing:".08em",transition:"all .3s"}}>{fI&&bI?"▶  Analyze Card":"Capture both sides"}</button>
       <div style={{marginTop:16,padding:14,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22"}}>
-        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.6 — DINGS-Based Scoring</div>
+        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.5 — DINGS-Based Scoring</div>
         <div style={{fontSize:12,color:"#666",lineHeight:1.7}}>
           Scoring engine rebuilt around <span style={{color:"#ff9944"}}>DINGS detection</span> — the same defect classification system TAG uses.
           Calibrated against 6 real TAG DIG reports spanning grades 5 through Gem Mint 10.
