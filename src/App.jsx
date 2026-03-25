@@ -283,6 +283,14 @@ function detectSurfaceDings(d, w, h, bn, side) {
   
   // Detect anomalous regions
   let anomCount=0, scratchCount=0, totalCells=0;
+  
+  // Holo/foil detection: check if image has high global variance (holo shimmer)
+  const isHolo = gVar > 800;
+  const diffThreshHigh = isHolo ? 35 : 25; // Was 18 — way too sensitive
+  const diffThreshLow = isHolo ? 22 : 15;  // Was 10
+  const varMultiplier = isHolo ? 3.5 : 2.8; // Was 2.2
+  const varFloor = isHolo ? 400 : 250;      // Was 150
+  
   for(let gy=1;gy<gY-1;gy++) for(let gx=1;gx<gX-1;gx++){
     totalCells++;
     const c=cells[gy][gx];
@@ -290,27 +298,27 @@ function detectSurfaceDings(d, w, h, bn, side) {
     const nMean=nbs.reduce((s,n)=>s+n.mean,0)/4;
     const diff=Math.abs(c.mean-nMean);
     
-    if(diff>18){anomCount++;defectCells.push({gx,gy,type:"anomaly",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
-    else if(diff>10){anomCount+=0.3;defectCells.push({gx,gy,type:"mark",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
-    if(c.variance>gVar*2.2 && c.variance>150){scratchCount++;defectCells.push({gx,gy,type:"scratch",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:c.variance});}
+    if(diff>diffThreshHigh){anomCount++;defectCells.push({gx,gy,type:"anomaly",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
+    else if(diff>diffThreshLow){anomCount+=0.3;defectCells.push({gx,gy,type:"mark",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:diff});}
+    if(c.variance>gVar*varMultiplier && c.variance>varFloor){scratchCount++;defectCells.push({gx,gy,type:"scratch",x:sx+gx*cellW,y:sy+gy*cellH,w:cellW,h:cellH,severity:c.variance});}
   }
   
   const anomRate = totalCells>0 ? anomCount/totalCells : 0;
   const scratchRate = totalCells>0 ? scratchCount/totalCells : 0;
   
-  // Classify as DINGS
-  if (anomRate > 0.06 || scratchRate > 0.05) {
+  // Classify as DINGS — thresholds raised significantly (screenshot test showed 33-41% on clean Gem Mint 10)
+  if (anomRate > 0.15 || scratchRate > 0.12) {
     dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
-  } else if (anomRate > 0.025 || scratchRate > 0.025) {
+  } else if (anomRate > 0.08 || scratchRate > 0.06) {
     dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:2, desc:"Surface wear visible" });
-  } else if (anomRate > 0.012 || scratchRate > 0.015) {
+  } else if (anomRate > 0.04 || scratchRate > 0.03) {
     dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:1, desc:"Minor surface imperfection" });
   }
   
   // Cluster defect cells for crop previews
   const regions = clusterDefects(defectCells, cellW);
   
-  return { dings, anomalyRate:Math.round(anomRate*10000)/100, scratchRate:Math.round(scratchRate*10000)/100, defectRegions:regions };
+  return { dings, anomalyRate:Math.round(anomRate*10000)/100, scratchRate:Math.round(scratchRate*10000)/100, defectRegions:regions, isHolo };
 }
 
 function clusterDefects(cells,cW){
@@ -476,6 +484,146 @@ function SurfaceVision({maps,label}){
   </div>);
 }
 
+/* Measurement Annotations Overlay — shows detected bounds on card photo */
+function MeasurementOverlay({ image, result, label }) {
+  const [showAnnotations, setShowAnnotations] = useState(false);
+  const [imgDims, setImgDims] = useState(null);
+  
+  useEffect(() => {
+    if (!image) return;
+    const img = new Image();
+    img.onload = () => setImgDims({ w: img.width, h: img.height });
+    img.src = image;
+  }, [image]);
+  
+  if (!result || !image) return null;
+  const bn = result.bounds;
+  const c = result.centering;
+  
+  return (
+    <div style={{marginBottom:12,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",overflow:"hidden"}}>
+      <div style={{padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{label}</span>
+        <button onClick={()=>setShowAnnotations(!showAnnotations)} style={{padding:"4px 10px",borderRadius:4,background:showAnnotations?"rgba(0,255,136,.1)":"transparent",border:`1px solid ${showAnnotations?"#00ff8833":"#1a1c22"}`,color:showAnnotations?"#00ff88":"#555",fontFamily:mono,fontSize:9,cursor:"pointer"}}>
+          {showAnnotations?"HIDE":"SHOW"} ANNOTATIONS
+        </button>
+      </div>
+      <div style={{position:"relative",width:"100%",aspectRatio:"2.5/3.5",background:"#0a0a0a"}}>
+        <img src={image} style={{width:"100%",height:"100%",objectFit:"contain"}}/>
+        {showAnnotations && imgDims && (
+          <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}} viewBox={`0 0 ${imgDims.w} ${imgDims.h}`} preserveAspectRatio="xMidYMid meet">
+            {/* Card boundary rectangle */}
+            <rect x={bn.left} y={bn.top} width={bn.cardW} height={bn.cardH} fill="none" stroke="#00ff88" strokeWidth="3" strokeDasharray="12,6"/>
+            
+            {/* Border measurements */}
+            {/* Left border */}
+            <line x1={0} y1={bn.top+bn.cardH/2} x2={bn.left} y2={bn.top+bn.cardH/2} stroke="#ff9944" strokeWidth="2"/>
+            <text x={bn.left/2} y={bn.top+bn.cardH/2-8} fill="#ff9944" fontSize={Math.max(14,bn.cardW*0.03)} fontFamily={mono} textAnchor="middle">{c.borderL}px</text>
+            
+            {/* Right border */}
+            <line x1={bn.left+bn.cardW} y1={bn.top+bn.cardH/2} x2={imgDims.w} y2={bn.top+bn.cardH/2} stroke="#ff9944" strokeWidth="2"/>
+            <text x={bn.left+bn.cardW+(imgDims.w-bn.left-bn.cardW)/2} y={bn.top+bn.cardH/2-8} fill="#ff9944" fontSize={Math.max(14,bn.cardW*0.03)} fontFamily={mono} textAnchor="middle">{c.borderR}px</text>
+            
+            {/* Top border */}
+            <line x1={bn.left+bn.cardW/2} y1={0} x2={bn.left+bn.cardW/2} y2={bn.top} stroke="#ff9944" strokeWidth="2"/>
+            <text x={bn.left+bn.cardW/2+10} y={bn.top/2+5} fill="#ff9944" fontSize={Math.max(14,bn.cardW*0.03)} fontFamily={mono}>{c.borderT}px</text>
+            
+            {/* Bottom border */}
+            <line x1={bn.left+bn.cardW/2} y1={bn.top+bn.cardH} x2={bn.left+bn.cardW/2} y2={imgDims.h} stroke="#ff9944" strokeWidth="2"/>
+            <text x={bn.left+bn.cardW/2+10} y={bn.top+bn.cardH+(imgDims.h-bn.top-bn.cardH)/2+5} fill="#ff9944" fontSize={Math.max(14,bn.cardW*0.03)} fontFamily={mono}>{c.borderB}px</text>
+            
+            {/* Center crosshair */}
+            <line x1={bn.left+bn.cardW/2-20} y1={bn.top+bn.cardH/2} x2={bn.left+bn.cardW/2+20} y2={bn.top+bn.cardH/2} stroke="#0088ff66" strokeWidth="2"/>
+            <line x1={bn.left+bn.cardW/2} y1={bn.top+bn.cardH/2-20} x2={bn.left+bn.cardW/2} y2={bn.top+bn.cardH/2+20} stroke="#0088ff66" strokeWidth="2"/>
+            
+            {/* Centering ratio text */}
+            <rect x={bn.left+bn.cardW/2-60} y={bn.top+10} width={120} height={22} rx={4} fill="rgba(0,0,0,.7)"/>
+            <text x={bn.left+bn.cardW/2} y={bn.top+25} fill="#00ff88" fontSize={Math.max(12,bn.cardW*0.025)} fontFamily={mono} textAnchor="middle">
+              {c.lrRatio}/{Math.round((100-c.lrRatio)*10)/10} LR · {c.tbRatio}/{Math.round((100-c.tbRatio)*10)/10} TB
+            </text>
+            
+            {/* Corner scan regions */}
+            {result.corners.details.map(corner => (
+              <rect key={corner.name} x={corner.cropX} y={corner.cropY} width={corner.cropSize} height={corner.cropSize}
+                fill="none" stroke={corner.hasDing?"#ff6633":"#00ff8844"} strokeWidth="2" strokeDasharray={corner.hasDing?"none":"4,4"}/>
+            ))}
+          </svg>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Grade Confidence Calculator */
+function calcConfidence(gradeResult, frontResult, backResult) {
+  let confidence = 100;
+  const reasons = [];
+  
+  // Check if centering defaulted to 50/50 (detection may have failed)
+  const fc = frontResult.centering;
+  if (fc.lrRatio === 50 && fc.tbRatio === 50) { confidence -= 25; reasons.push("Front centering defaulted to 50/50 — border detection may have failed"); }
+  const bc = backResult.centering;
+  if (bc.lrRatio === 50 && bc.tbRatio === 50) { confidence -= 15; reasons.push("Back centering defaulted to 50/50"); }
+  
+  // Check if score is near a grade boundary (within 20 points)
+  const score = gradeResult.tagScore;
+  const boundaries = [990, 950, 900, 850, 800, 700, 600, 500];
+  for (const b of boundaries) {
+    if (Math.abs(score - b) < 20) { confidence -= 15; reasons.push(`Score ${score} is near the ${b}-point grade boundary`); break; }
+  }
+  
+  // Check if holo was detected (surface analysis less reliable)
+  if (frontResult.surface.isHolo) { confidence -= 10; reasons.push("Holo card detected — surface analysis adjusted"); }
+  if (backResult.surface.isHolo) { confidence -= 5; reasons.push("Back has high variance pattern"); }
+  
+  // Check surface anomaly rates (high rates even below DING threshold suggest noise)
+  if (frontResult.surface.anomalyRate > 10 && frontResult.surface.dings.length === 0) {
+    confidence -= 10; reasons.push("Front surface has elevated noise but no DING flagged");
+  }
+  
+  const level = confidence >= 80 ? "HIGH" : confidence >= 55 ? "MEDIUM" : "LOW";
+  const color = confidence >= 80 ? "#00ff88" : confidence >= 55 ? "#ffcc00" : "#ff6633";
+  
+  return { confidence: Math.max(0, confidence), level, color, reasons };
+}
+
+/* Next Grade Comparison */
+function getNextGradeInfo(gradeResult) {
+  const score = gradeResult.tagScore;
+  const dings = gradeResult.allDings;
+  const totalDings = gradeResult.totalDings;
+  const frontDings = dings.filter(d => d.side === "FRONT");
+  const backDings = dings.filter(d => d.side === "BACK");
+  const surfaceDings = dings.filter(d => d.type.includes("SURFACE"));
+  const cornerDings = dings.filter(d => d.type.includes("CORNER"));
+  const edgeDings = dings.filter(d => d.type.includes("EDGE"));
+  const centerDings = dings.filter(d => d.type === "CENTERING");
+  
+  const tips = [];
+  
+  if (score >= 950) {
+    tips.push({ text: "Card is in Gem Mint range — potential Pristine if centering is near-perfect", color: "#00ff88" });
+  } else if (score >= 900) {
+    if (centerDings.length > 0) tips.push({ text: "Centering is the only DING — improve framing won't fix the card, but it's close to a 10", color: "#66dd44" });
+    if (totalDings <= 1) tips.push({ text: "Only 1 DING away from Gem Mint 10", color: "#66dd44" });
+  } else if (score >= 800) {
+    if (frontDings.length > 0) tips.push({ text: `${frontDings.length} front DING${frontDings.length>1?"s":""} — front defects weigh 2x. A clean front pushes toward Mint 9`, color: "#ffcc00" });
+    if (surfaceDings.length > 0) tips.push({ text: "Surface wear is the heaviest grade penalty — this is what separates 8 from 9+", color: "#ffcc00" });
+    tips.push({ text: `${totalDings} total DINGS — reducing to 0-1 needed for Mint 9`, color: "#ffcc00" });
+  } else if (score >= 700) {
+    if (frontDings.length >= 2) tips.push({ text: `Multiple front defects detected — cards with back-only DINGS grade significantly higher`, color: "#ff9900" });
+    tips.push({ text: `Need ${Math.max(0, totalDings - 4)} fewer DINGS for NM-MT 8 range`, color: "#ff9900" });
+  } else if (score >= 600) {
+    tips.push({ text: `${totalDings} DINGS with front surface wear — this pattern typically grades 6-7 at TAG`, color: "#ff6633" });
+    if (surfaceDings.length > 0) tips.push({ text: "Front surface play wear is the biggest grade limiter", color: "#ff6633" });
+  } else {
+    tips.push({ text: `Heavy defect load (${totalDings} DINGS) — card shows significant wear`, color: "#ff4444" });
+    if (surfaceDings.length >= 2) tips.push({ text: "Surface wear on both sides — characteristic of grade 5 range", color: "#ff4444" });
+  }
+  
+  return tips;
+}
+
 /* DINGS Map Schematic */
 function DingsMap({ frontResult, backResult }) {
   const [side, setSide] = useState("front");
@@ -486,21 +634,32 @@ function DingsMap({ frontResult, backResult }) {
   const edgeData = result.edges.details;
   const centering = result.centering;
   const sideLabel = side === "front" ? "FRONT" : "BACK";
-  
   const dingColor = "#ff6633";
   const cleanColor = "#333";
-  
   const getCorner = (name) => cornerData.find(c => c.name === name) || {};
   const getEdge = (name) => edgeData.find(e => e.name === name) || {};
   
-  const ScoreLabel = ({x, y, data, showAngle}) => (
+  // Card rect coordinates
+  const cx=100, cy=80, cw=160, ch=224;
+
+  const CornerScore = ({x, y, data, align="middle"}) => (
     <g>
-      <text x={x} y={y} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Fray: {data.fray || "—"}</text>
-      <text x={x} y={y+10} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Fill: {data.fill || "—"}</text>
-      {showAngle && data.angle && <text x={x} y={y+20} fill="#666" fontSize="7" fontFamily={mono} textAnchor="middle">Angle: {data.angle}</text>}
+      <text x={x} y={y} fill={data.hasDing?dingColor:"#555"} fontSize="7.5" fontFamily={mono} textAnchor={align} fontWeight={data.hasDing?600:400}>
+        {data.name || ""}
+      </text>
+      <text x={x} y={y+11} fill="#555" fontSize="6.5" fontFamily={mono} textAnchor={align}>F:{data.fray||"—"} Fi:{data.fill||"—"}{data.angle!==undefined?` A:${data.angle}`:""}</text>
     </g>
   );
-  
+
+  const EdgeScore = ({x, y, data, align="middle"}) => (
+    <g>
+      <text x={x} y={y} fill={data.hasDing?dingColor:"#555"} fontSize="7.5" fontFamily={mono} textAnchor={align} fontWeight={data.hasDing?600:400}>
+        {data.name||""} EDGE
+      </text>
+      <text x={x} y={y+11} fill="#555" fontSize="6.5" fontFamily={mono} textAnchor={align}>F:{data.fray||"—"} Fi:{data.fill||"—"}</text>
+    </g>
+  );
+
   return (
     <div style={{background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",padding:12,marginBottom:16}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -509,45 +668,68 @@ function DingsMap({ frontResult, backResult }) {
           {["front","back"].map(s=>(<button key={s} onClick={()=>setSide(s)} style={{padding:"4px 10px",borderRadius:4,background:side===s?"rgba(0,255,136,.1)":"transparent",border:`1px solid ${side===s?"#00ff8833":"#1a1c22"}`,color:side===s?"#00ff88":"#555",fontFamily:mono,fontSize:9,textTransform:"uppercase",cursor:"pointer"}}>{s}</button>))}
         </div>
       </div>
-      <svg viewBox="0 0 320 420" style={{width:"100%"}}>
+      <svg viewBox="0 0 360 540" style={{width:"100%"}}>
         {/* Card outline */}
-        <rect x="80" y="40" width="160" height="224" rx="6" fill="none" stroke="#333" strokeWidth="1.5"/>
+        <rect x={cx} y={cy} width={cw} height={ch} rx="6" fill="none" stroke="#333" strokeWidth="1.5"/>
         
         {/* Center crosshair */}
-        <line x1="160" y1="40" x2="160" y2="264" stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
-        <line x1="80" y1="152" x2="240" y2="152" stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
+        <line x1={cx+cw/2} y1={cy} x2={cx+cw/2} y2={cy+ch} stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
+        <line x1={cx} y1={cy+ch/2} x2={cx+cw} y2={cy+ch/2} stroke="#1a1c22" strokeWidth="0.5" strokeDasharray="4,4"/>
+        <text x={cx+cw/2} y={cy+ch/2+3} fill="#222" fontSize="10" fontFamily={mono} textAnchor="middle" fontWeight="700">TAG</text>
         
-        {/* TAG logo center */}
-        <text x="160" y="156" fill="#222" fontSize="10" fontFamily={mono} textAnchor="middle" fontWeight="700">TAG</text>
+        {/* Centering values on card */}
+        <text x={cx+cw/2} y={cy-8} fill="#888" fontSize="8.5" fontFamily={mono} textAnchor="middle">C: {centering.tbRatio}</text>
+        <text x={cx+cw/2} y={cy+ch+16} fill="#888" fontSize="8.5" fontFamily={mono} textAnchor="middle">C: {Math.round((100-centering.tbRatio)*10)/10}</text>
+        <text x={cx-10} y={cy+ch/2+3} fill="#888" fontSize="8.5" fontFamily={mono} textAnchor="end">C: {centering.lrRatio}</text>
+        <text x={cx+cw+10} y={cy+ch/2+3} fill="#888" fontSize="8.5" fontFamily={mono} textAnchor="start">C: {Math.round((100-centering.lrRatio)*10)/10}</text>
         
-        {/* Centering values */}
-        <text x="160" y="34" fill="#888" fontSize="8" fontFamily={mono} textAnchor="middle">C: {centering.tbRatio}</text>
-        <text x="160" y="278" fill="#888" fontSize="8" fontFamily={mono} textAnchor="middle">C: {Math.round((100-centering.tbRatio)*10)/10}</text>
-        <text x="72" y="156" fill="#888" fontSize="8" fontFamily={mono} textAnchor="end">C: {centering.lrRatio}</text>
-        <text x="248" y="156" fill="#888" fontSize="8" fontFamily={mono} textAnchor="start">C: {Math.round((100-centering.lrRatio)*10)/10}</text>
-        
-        {/* Corner indicators */}
-        {[{name:"TOP LEFT",x:80,y:40,lx:30,ly:310},{name:"TOP RIGHT",x:240,y:40,lx:290,ly:310},{name:"BOTTOM LEFT",x:80,y:264,lx:30,ly:370},{name:"BOTTOM RIGHT",x:240,y:264,lx:290,ly:370}].map(({name,x,y,lx,ly})=>{
-          const data = getCorner(name);
-          return(<g key={name}>
-            <rect x={x-6} y={y-6} width={12} height={12} rx={2} fill="none" stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?2:1} strokeDasharray={data.hasDing?"none":"3,3"}/>
-            <text x={lx} y={ly} fill={data.hasDing?dingColor:"#555"} fontSize="7" fontFamily={mono} textAnchor="middle">{name.replace(" ","\n")}</text>
-            <ScoreLabel x={lx} y={ly+12} data={data} showAngle={side==="front"}/>
-          </g>);
+        {/* Corner indicators on card */}
+        {[{n:"TOP LEFT",x:cx,y:cy},{n:"TOP RIGHT",x:cx+cw,y:cy},{n:"BOTTOM LEFT",x:cx,y:cy+ch},{n:"BOTTOM RIGHT",x:cx+cw,y:cy+ch}].map(({n,x,y})=>{
+          const data=getCorner(n);
+          return(<rect key={n} x={x-7} y={y-7} width={14} height={14} rx={3} fill="none"
+            stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?2.5:1} strokeDasharray={data.hasDing?"none":"3,3"}/>);
         })}
         
-        {/* Edge indicators */}
-        {[{name:"TOP",x1:110,y1:40,x2:210,y2:40,lx:160,ly:300},{name:"BOTTOM",x1:110,y1:264,x2:210,y2:264,lx:160,ly:390},{name:"LEFT",x1:80,y1:80,x2:80,y2:224,lx:30,ly:340},{name:"RIGHT",x1:240,y1:80,x2:240,y2:224,lx:290,ly:340}].map(({name,x1,y1,x2,y2,lx,ly})=>{
-          const data = getEdge(name);
-          return(<g key={name}>
-            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?3:1}/>
-            <text x={lx} y={ly} fill={data.hasDing?dingColor:"#555"} fontSize="7" fontFamily={mono} textAnchor="middle">{name} EDGE</text>
-            <ScoreLabel x={lx} y={ly+12} data={data} showAngle={false}/>
-          </g>);
+        {/* Edge indicators on card */}
+        {[{n:"TOP",x1:cx+30,y1:cy,x2:cx+cw-30,y2:cy},{n:"BOTTOM",x1:cx+30,y1:cy+ch,x2:cx+cw-30,y2:cy+ch},{n:"LEFT",x1:cx,y1:cy+30,x2:cx,y2:cy+ch-30},{n:"RIGHT",x1:cx+cw,y1:cy+30,x2:cx+cw,y2:cy+ch-30}].map(({n,x1,y1,x2,y2})=>{
+          const data=getEdge(n);
+          return(<line key={n} x1={x1} y1={y1} x2={x2} y2={y2} stroke={data.hasDing?dingColor:cleanColor} strokeWidth={data.hasDing?3:1.5}/>);
         })}
+
+        {/* === SCORE LABELS (below card, well-spaced) === */}
+        
+        {/* Top corners row */}
+        <CornerScore x={45} y={cy+ch+40} data={getCorner("TOP LEFT")} align="start"/>
+        <CornerScore x={315} y={cy+ch+40} data={getCorner("TOP RIGHT")} align="end"/>
+        
+        {/* Top edge (centered) */}
+        <EdgeScore x={180} y={cy+ch+40} data={getEdge("TOP")} align="middle"/>
+        
+        {/* Left/Right edges row */}
+        <EdgeScore x={45} y={cy+ch+72} data={getEdge("LEFT")} align="start"/>
+        <EdgeScore x={315} y={cy+ch+72} data={getEdge("RIGHT")} align="end"/>
+        
+        {/* Bottom edge (centered) */}
+        <EdgeScore x={180} y={cy+ch+72} data={getEdge("BOTTOM")} align="middle"/>
+        
+        {/* Bottom corners row */}
+        <CornerScore x={45} y={cy+ch+104} data={getCorner("BOTTOM LEFT")} align="start"/>
+        <CornerScore x={315} y={cy+ch+104} data={getCorner("BOTTOM RIGHT")} align="end"/>
+        
+        {/* Separator line */}
+        <line x1="30" y1={cy+ch+126} x2="330" y2={cy+ch+126} stroke="#1a1c22" strokeWidth="0.5"/>
         
         {/* Side label */}
-        <text x="160" y="410" fill="#444" fontSize="9" fontFamily={mono} textAnchor="middle">{sideLabel}</text>
+        <text x="180" y={cy+ch+142} fill="#444" fontSize="9" fontFamily={mono} textAnchor="middle">{sideLabel}</text>
+        
+        {/* DINGS legend */}
+        {result.allDings.length > 0 && (<g>
+          <rect x="30" y={cy+ch+152} width="300" height={20+result.allDings.length*14} rx="4" fill="rgba(255,102,51,.04)" stroke="#ff663322" strokeWidth="0.5"/>
+          <text x="40" y={cy+ch+166} fill="#ff6633" fontSize="7.5" fontFamily={mono} fontWeight="600">DINGS DETECTED:</text>
+          {result.allDings.map((d,i)=>(
+            <text key={i} x="40" y={cy+ch+180+i*14} fill="#ff9944" fontSize="7" fontFamily={mono}>⚡ {d.type} — {d.location}</text>
+          ))}
+        </g>)}
       </svg>
     </div>
   );
@@ -907,7 +1089,7 @@ export default function TAGPreGrader(){
     <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1c22",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:"#0a0b0e"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#00ff88,#0088ff)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:900,fontSize:13,color:"#000"}}>TG</div>
-        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.0 — DINGS-Based Engine</div></div>
+        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.2 — DINGS-Based Engine</div></div>
       </div>
       {step===2&&<button onClick={reset} style={{background:"transparent",border:"1px solid #2a2d35",borderRadius:6,color:"#666",fontFamily:mono,fontSize:10,padding:"5px 10px",cursor:"pointer",textTransform:"uppercase"}}>New</button>}
     </div>
@@ -920,11 +1102,11 @@ export default function TAGPreGrader(){
       </div>
       <button onClick={run} disabled={!fI||!bI} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:fI&&bI?"linear-gradient(135deg,#00ff88,#0088ff)":"#1a1c22",color:fI&&bI?"#000":"#444",fontFamily:mono,fontSize:13,fontWeight:700,cursor:fI&&bI?"pointer":"default",textTransform:"uppercase",letterSpacing:".08em",transition:"all .3s"}}>{fI&&bI?"▶  Analyze Card":"Capture both sides"}</button>
       <div style={{marginTop:16,padding:14,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22"}}>
-        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.0 — DINGS-Based Scoring</div>
+        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.2 — DINGS-Based Scoring</div>
         <div style={{fontSize:12,color:"#666",lineHeight:1.7}}>
           Scoring engine rebuilt around <span style={{color:"#ff9944"}}>DINGS detection</span> — the same defect classification system TAG uses.
           Calibrated against 6 real TAG DIG reports spanning grades 5 through Gem Mint 10.
-          Front defects weighted ~2x heavier than back. Surface play wear is the biggest grade killer.
+          Front defects weighted ~2x heavier than back. Holo card detection adjusts surface thresholds automatically.
         </div>
       </div>
     </div>)}
@@ -949,6 +1131,14 @@ export default function TAGPreGrader(){
             <ScoreRing score={gr.tagScore} size={100} label="TAG Score"/>
             <div style={{fontFamily:mono,fontSize:18,fontWeight:700,color:gr.grade.color,marginTop:4}}>{gr.grade.label}</div>
             <div style={{fontFamily:mono,fontSize:10,color:"#555",marginTop:4}}>DINGS-based estimate · TCG</div>
+            {/* Confidence indicator */}
+            {(()=>{const conf=calcConfidence(gr,fR,bR);return(
+              <div style={{marginTop:8,display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",borderRadius:20,background:"rgba(0,0,0,.3)"}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:conf.color}}/>
+                <span style={{fontFamily:mono,fontSize:9,color:conf.color}}>{conf.level} CONFIDENCE</span>
+                <span style={{fontFamily:mono,fontSize:9,color:"#444"}}>{conf.confidence}%</span>
+              </div>
+            );})()}
           </div>
           
           <div style={{padding:14,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",marginBottom:12}}>
@@ -968,6 +1158,27 @@ export default function TAGPreGrader(){
               </div>);
             })}
           </div>
+
+          {/* Next Grade Comparison */}
+          <div style={{padding:14,background:"#0d0f13",borderRadius:10,border:"1px solid #1a1c22",marginBottom:12}}>
+            <div style={{fontFamily:mono,fontSize:10,color:"#888",textTransform:"uppercase",marginBottom:8}}>Grade Analysis</div>
+            {getNextGradeInfo(gr).map((tip,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:i<getNextGradeInfo(gr).length-1?8:0}}>
+                <div style={{width:3,borderRadius:2,background:tip.color,flexShrink:0,marginTop:2}}/>
+                <div style={{fontFamily:sans,fontSize:12,color:"#aaa",lineHeight:1.5}}>{tip.text}</div>
+              </div>
+            ))}
+          </div>
+          
+          {/* Confidence details (expandable) */}
+          {(()=>{const conf=calcConfidence(gr,fR,bR);return conf.reasons.length>0?(
+            <div style={{padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${conf.color}22`,marginBottom:12}}>
+              <div style={{fontFamily:mono,fontSize:10,color:conf.color,textTransform:"uppercase",marginBottom:8}}>Confidence Notes</div>
+              {conf.reasons.map((r,i)=>(
+                <div key={i} style={{fontFamily:sans,fontSize:11,color:"#777",marginBottom:4}}>• {r}</div>
+              ))}
+            </div>
+          ):null;})()}
 
           <div style={{display:"flex",gap:8}}>
             <div style={{flex:1,aspectRatio:"2.5/3.5",borderRadius:8,overflow:"hidden",background:"#0a0a0a"}}><img src={fI} style={{width:"100%",height:"100%",objectFit:"contain"}}/></div>
@@ -1007,6 +1218,10 @@ export default function TAGPreGrader(){
 
         {/* CENTERING */}
         {tab==="centering"&&fR&&bR&&(<div>
+          {/* Measurement Annotation Overlays */}
+          <MeasurementOverlay image={fI} result={fR} label="Front — Detection Overlay"/>
+          <MeasurementOverlay image={bI} result={bR} label="Back — Detection Overlay"/>
+          
           {[["Front",fR],["Back",bR]].map(([s,r])=>{
             const maxOff=Math.max(Math.max(r.centering.lrRatio,100-r.centering.lrRatio),Math.max(r.centering.tbRatio,100-r.centering.tbRatio));
             const hasDing=r.centerDings.length>0;
@@ -1070,7 +1285,10 @@ export default function TAGPreGrader(){
             const hasDing=r.surface.dings.length>0;
             return(<div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${hasDing?"#ff663344":"#1a1c22"}`}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-                <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
+                  {r.surface.isHolo&&<span style={{padding:"2px 6px",borderRadius:4,background:"rgba(136,0,255,.15)",border:"1px solid rgba(136,0,255,.3)",fontFamily:mono,fontSize:8,color:"#aa66ff"}}>HOLO DETECTED</span>}
+                </div>
                 {hasDing&&<span style={{fontFamily:mono,fontSize:10,color:"#ff6633",fontWeight:600}}>⚠ DING</span>}
               </div>
               <div style={{display:"flex",gap:8,marginBottom:10}}>
