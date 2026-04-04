@@ -317,6 +317,22 @@ function detectCornerDings(d, w, h, bn, side) {
   const cardGVar=gN>0?gSq/gN-(gS/gN)**2:0;
   const isHolo = cardGVar > 800;
 
+  // Mid-edge brightness baseline for holo cards:
+  // Sample the center strip of the top edge (same depth as corner scan, away from corners).
+  // On a mint foil card, mid-edge and corners have the same foil brightness.
+  // Only a genuinely worn corner will be notably BRIGHTER than this baseline.
+  // This self-calibrates per card and per lighting condition.
+  let midWhite=0, midTotal=0;
+  if (isHolo) {
+    const midX0=cl+~~(cW*0.35), midX1=cl+~~(cW*0.65);
+    for(let dy=0;dy<cs;dy++) for(let mx=midX0;mx<midX1;mx++){
+      const X=Math.min(w-1,mx), Y=Math.min(h-1,ct+dy);
+      const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); midTotal++;
+      if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) midWhite++;
+    }
+  }
+  const edgeBaselineRatio = midTotal>0 ? midWhite/midTotal : 0;
+
   for (const { name, x:cx, y:cy } of corners) {
     let whitePixels=0, colorDevPixels=0, totalPixels=0, sharpness=0, gradCount=0;
     let lSum=0, lSq=0, lN=0; // for luminance variance (foil uniform-glow check)
@@ -348,12 +364,18 @@ function detectCornerDings(d, w, h, bn, side) {
     // Foil false-positive guard:
     //   Foil reflection = high mean luminance + LOW variance (uniform, even glow)
     //   Real corner wear = high mean luminance + HIGH variance (patchy, uneven whitening)
-    // Proof: TAG-verified 10 Mew EX shows identical F:980/Fi:975 on all 8 corners — that's
-    // the foil glow, not wear. Real wear would never be perfectly symmetrical across all corners.
     const lumVariance = lN>0 ? lSq/lN-(lSum/lN)**2 : 0;
-    const isUniformBright = (lN>0 && lSum/lN > 180) && lumVariance < 200;
-    // Holo cards also get raised raw thresholds even for non-uniform regions (foil ≠ white paper)
-    const holoMultiplier = isHolo ? 2.0 : 1.0;
+    const isUniformBright = (lN>0 && lSum/lN > 180) && lumVariance < 500;
+    
+    // Holo relative comparison: subtract the card's own mid-edge foil brightness baseline.
+    // A mint foil card has similar white ratio at corners AND mid-edge (it's all foil).
+    // Only a genuinely worn corner is notably brighter than the surrounding edge material.
+    // adjustedWear = how much EXCESS whiteness the corner has beyond baseline foil glow.
+    const adjustedWearRatio = isHolo
+      ? Math.max(0, effectiveWearRatio - edgeBaselineRatio * 0.85)
+      : effectiveWearRatio;
+    const wearThreshold = isHolo ? 0.12 : 0.10;
+    const sharpThreshold = isHolo ? 2 : 4;
     
     // Fray/Fill/Angle scoring (TAG-style supplementary metrics)
     let fray = 1000, fill = 1000, angle = 1000;
@@ -367,9 +389,9 @@ function detectCornerDings(d, w, h, bn, side) {
     const sideLabel = side === "front" ? "FRONT" : "BACK";
     
     // DING threshold: uniform bright glow = foil reflection, not wear → skip.
-    // Holo cards: double the wear ratio threshold (foil material ≠ worn paper).
-    const hasWear = !isUniformBright && 
-      (effectiveWearRatio > 0.10 * holoMultiplier || avgSharp < 4 / holoMultiplier);
+    // Holo: use adjusted ratio (corner excess over baseline) with tighter sharpness gate.
+    const hasWear = !isUniformBright &&
+      (adjustedWearRatio > wearThreshold || avgSharp < sharpThreshold);
     if (hasWear) {
       dings.push({
         side: sideLabel,
