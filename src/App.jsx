@@ -488,8 +488,8 @@ function analyzeCenteringV2(edgeD, origD, w, h, bn){
   const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
   const thresholds = [50, 100, 150, 200, 300, 500];
   const validResults = [];
-  const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(edgeD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
-  const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(edgeD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+  const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(origD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+  const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(origD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
 
   for (const vT of thresholds) {
     let bL=0,bR=0,bT=0,bB=0;
@@ -498,9 +498,13 @@ function analyzeCenteringV2(edgeD, origD, w, h, bn){
     for(let y=ct+~~(cH*.01);y<ct+~~(cH*.25);y++) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bT=y-ct;break;}
     for(let y=cb-~~(cH*.01);y>cb-~~(cH*.25);y--) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bB=cb-y;break;}
     if (bL > 0 && bR > 0 && bT > 0 && bB > 0) {
+      const minB=Math.min(bL,bR,bT,bB);
+      const maxB=Math.max(bL,bR,bT,bB);
+      const asymOk = minB>1 && (maxB/minB) < 4.0;
+      if(!asymOk) continue;
       const lrTotal = bL+bR, tbTotal = bT+bB;
       const lrPct = lrTotal/cW, tbPct = tbTotal/cH;
-      if (lrPct > 0.01 && lrPct < 0.35 && tbPct > 0.01 && tbPct < 0.35) {
+      if (lrPct > 0.01 && lrPct < 0.22 && tbPct > 0.01 && tbPct < 0.22) {
         validResults.push({ borderL:bL, borderR:bR, borderT:bT, borderB:bB });
       }
     }
