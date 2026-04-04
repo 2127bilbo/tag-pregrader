@@ -283,17 +283,17 @@ function detectCornerDings(d, w, h, bn, side) {
   const { left:cl, right:cr, top:ct, bottom:cb, cardW:cW, cardH:cH } = bn;
   const cs = Math.max(24, ~~(Math.min(cW, cH) * 0.09));
   const corners = [
-    { name:"TOP LEFT", x:cl, y:ct },
-    { name:"TOP RIGHT", x:cr-cs, y:ct },
-    { name:"BOTTOM LEFT", x:cl, y:cb-cs },
+    { name:"TOP LEFT",     x:cl,    y:ct    },
+    { name:"TOP RIGHT",    x:cr-cs, y:ct    },
+    { name:"BOTTOM LEFT",  x:cl,    y:cb-cs },
     { name:"BOTTOM RIGHT", x:cr-cs, y:cb-cs },
   ];
-  
+
   const dings = [];
   const details = [];
+  const sideLabel = side === "front" ? "FRONT" : "BACK";
 
-  // Sample the card border color from a safe mid-edge region to know what the border looks like
-  // This lets us detect wear on dark-bordered WOTC cards (blue/black border, not just white)
+  // ── Border color (WOTC dark-border detection) ────────────────────────────
   const edgeSamples = 12;
   let borderR=0, borderG=0, borderB=0;
   for(let i=0; i<edgeSamples; i++){
@@ -302,50 +302,34 @@ function detectCornerDings(d, w, h, bn, side) {
     const [pr,pg,pb] = PX(d,w,ex,ey);
     borderR+=pr; borderG+=pg; borderB+=pb;
   }
-  borderR=borderR/edgeSamples; borderG=borderG/edgeSamples; borderB=borderB/edgeSamples;
+  borderR/=edgeSamples; borderG/=edgeSamples; borderB/=edgeSamples;
   const borderLum = LUM(borderR,borderG,borderB);
-  const isDarkBorder = borderLum < 80; // WOTC-era cards have dark blue/black borders
+  const isDarkBorder = borderLum < 80;
 
-  // Holo/foil detection: sample global card variance (same method as surface detection).
-  // Foil cards produce false corner DINGS — their reflective border creates uniformly bright,
-  // color-neutral pixels indistinguishable from corner whitening. gVar > 800 = foil/holo.
+  // ── Holo detection (global variance) ────────────────────────────────────
   let gS=0,gSq=0,gN=0;
   const gStep=Math.max(4,~~(Math.min(cW,cH)/40));
   for(let gy=ct+~~(cH*0.1);gy<cb-~~(cH*0.1);gy+=gStep)
-    for(let gx=cl+~~(cW*0.1);gx<cr-~~(cW*0.1);gx+=gStep)
-      {const l=LUM(...PX(d,w,Math.min(w-1,gx),Math.min(h-1,gy)));gS+=l;gSq+=l*l;gN++;}
-  const cardGVar=gN>0?gSq/gN-(gS/gN)**2:0;
+    for(let gx=cl+~~(cW*0.1);gx<cr-~~(cW*0.1);gx+=gStep){
+      const l=LUM(...PX(d,w,Math.min(w-1,gx),Math.min(h-1,gy)));
+      gS+=l; gSq+=l*l; gN++;
+    }
+  const cardGVar = gN>0 ? gSq/gN-(gS/gN)**2 : 0;
   const isHolo = cardGVar > 800;
 
-  // Mid-edge brightness baseline for holo cards:
-  // Sample the center strip of the top edge (same depth as corner scan, away from corners).
-  // On a mint foil card, mid-edge and corners have the same foil brightness.
-  // Only a genuinely worn corner will be notably BRIGHTER than this baseline.
-  // This self-calibrates per card and per lighting condition.
-  let midWhite=0, midTotal=0;
-  if (isHolo) {
-    const midX0=cl+~~(cW*0.35), midX1=cl+~~(cW*0.65);
-    for(let dy=0;dy<cs;dy++) for(let mx=midX0;mx<midX1;mx++){
-      const X=Math.min(w-1,mx), Y=Math.min(h-1,ct+dy);
-      const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); midTotal++;
-      if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) midWhite++;
-    }
-  }
-  const edgeBaselineRatio = midTotal>0 ? midWhite/midTotal : 0;
-
-  for (const { name, x:cx, y:cy } of corners) {
+  // ── Pass 1: measure every corner, store raw data ─────────────────────────
+  const cornerData = corners.map(({ name, x:cx, y:cy }) => {
     let whitePixels=0, colorDevPixels=0, totalPixels=0, sharpness=0, gradCount=0;
-    let lSum=0, lSq=0, lN=0; // for luminance variance (foil uniform-glow check)
-    
-    for (let dy=0; dy<cs; dy++) for (let dx=0; dx<cs; dx++) {
+    let lSum=0, lSq=0, lN=0;
+
+    for(let dy=0; dy<cs; dy++) for(let dx=0; dx<cs; dx++){
       const X=Math.min(w-1,Math.max(0,cx+dx)), Y=Math.min(h-1,Math.max(0,cy+dy));
-      const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); totalPixels++;
-      lSum+=l; lSq+=l*l; lN++;
+      const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b);
+      totalPixels++; lSum+=l; lSq+=l*l; lN++;
       if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) whitePixels++;
-      // For dark-bordered cards: also detect significant color deviation from expected border
       if(isDarkBorder){
-        const colorDiff = Math.abs(r-borderR)+Math.abs(g-borderG)+Math.abs(b-borderB);
-        if(colorDiff > 60 && l > borderLum+40) colorDevPixels++; // lighter than expected = wear
+        const cd=Math.abs(r-borderR)+Math.abs(g-borderG)+Math.abs(b-borderB);
+        if(cd>60 && l>borderLum+40) colorDevPixels++;
       }
       if(dx<cs-1 && dy<cs-1){
         const gx=Math.abs(LUM(...PX(d,w,Math.min(w-1,X+1),Y))-l);
@@ -353,58 +337,71 @@ function detectCornerDings(d, w, h, bn, side) {
         sharpness+=Math.sqrt(gx*gx+gy*gy); gradCount++;
       }
     }
-    
-    const whiteRatio = totalPixels>0 ? whitePixels/totalPixels : 0;
-    const colorDevRatio = totalPixels>0 ? colorDevPixels/totalPixels : 0;
-    const avgSharp = gradCount>0 ? sharpness/gradCount : 0;
-    
-    // Combined wear signal: white pixels OR color deviation on dark-border cards
-    const effectiveWearRatio = isDarkBorder ? Math.max(whiteRatio, colorDevRatio*0.7) : whiteRatio;
-    
-    // Foil false-positive guard:
-    //   Foil reflection = high mean luminance + LOW variance (uniform, even glow)
-    //   Real corner wear = high mean luminance + HIGH variance (patchy, uneven whitening)
-    const lumVariance = lN>0 ? lSq/lN-(lSum/lN)**2 : 0;
-    const isUniformBright = (lN>0 && lSum/lN > 180) && lumVariance < 500;
-    
-    // Holo relative comparison: subtract the card's own mid-edge foil brightness baseline.
-    // A mint foil card has similar white ratio at corners AND mid-edge (it's all foil).
-    // Only a genuinely worn corner is notably brighter than the surrounding edge material.
-    // adjustedWear = how much EXCESS whiteness the corner has beyond baseline foil glow.
-    const adjustedWearRatio = isHolo
-      ? Math.max(0, effectiveWearRatio - edgeBaselineRatio * 0.85)
-      : effectiveWearRatio;
-    const wearThreshold = isHolo ? 0.12 : 0.10;
-    const sharpThreshold = isHolo ? 2 : 4;
-    
-    // Fray/Fill/Angle scoring (TAG-style supplementary metrics)
-    let fray = 1000, fill = 1000, angle = 1000;
-    if (effectiveWearRatio > 0.30) { fray -= 20; fill -= 25; }
-    else if (effectiveWearRatio > 0.15) { fray -= 10; fill -= 12; }
-    else if (effectiveWearRatio > 0.05) { fray -= 3; fill -= 5; }
-    if (avgSharp < 5) angle -= 8;
-    else if (avgSharp < 8) angle -= 4;
-    else if (avgSharp < 12) angle -= 2;
-    
-    const sideLabel = side === "front" ? "FRONT" : "BACK";
-    
-    // DING threshold: uniform bright glow = foil reflection, not wear → skip.
-    // Holo: use adjusted ratio (corner excess over baseline) with tighter sharpness gate.
-    const hasWear = !isUniformBright &&
-      (adjustedWearRatio > wearThreshold || avgSharp < sharpThreshold);
-    if (hasWear) {
+
+    const whiteRatio      = totalPixels>0 ? whitePixels/totalPixels : 0;
+    const colorDevRatio   = totalPixels>0 ? colorDevPixels/totalPixels : 0;
+    const avgSharp        = gradCount>0 ? sharpness/gradCount : 0;
+    const effectiveWear   = isDarkBorder ? Math.max(whiteRatio, colorDevRatio*0.7) : whiteRatio;
+    const lumMean         = lN>0 ? lSum/lN : 0;
+    const lumVariance     = lN>0 ? lSq/lN - lumMean**2 : 0;
+    const isUniformBright = lumMean > 180 && lumVariance < 600;
+
+    // Fray/Fill/Angle (supplementary display metrics only — not used for DING decision)
+    let fray=1000, fill=1000, angle=1000;
+    if(effectiveWear>0.30){fray-=20;fill-=25;}
+    else if(effectiveWear>0.15){fray-=10;fill-=12;}
+    else if(effectiveWear>0.05){fray-=3;fill-=5;}
+    if(avgSharp<5) angle-=8; else if(avgSharp<8) angle-=4; else if(avgSharp<12) angle-=2;
+
+    return { name, effectiveWear, avgSharp, isUniformBright, fray, fill, angle, cx, cy };
+  });
+
+  // ── Pass 2: cross-corner symmetry suppression (holo only) ───────────────
+  // KEY DIAGNOSTIC from 15-card dataset:
+  //   False positives → all 4 corners score F:980/Fi:975 identically.
+  //   Real wear → asymmetric; corners wear at different rates from handling.
+  //
+  // If 3+ corners have wear ratios within 8% of each other AND the spread
+  // across all 4 is under 10%, it's foil glow not damage.
+  // Safety valve: don't suppress if any corner exceeds 35% (genuinely damaged card).
+  let suppressAll = false;
+  if (isHolo) {
+    const wears = cornerData.map(c => c.effectiveWear);
+    const maxW = Math.max(...wears), minW = Math.min(...wears);
+    const nearMax = wears.filter(v => maxW - v < 0.08).length;
+    if (nearMax >= 3 && (maxW - minW) < 0.10 && maxW < 0.35) suppressAll = true;
+  }
+
+  // ── Pass 3: decide DING per corner and build output ─────────────────────
+  for (const c of cornerData) {
+    // Standard threshold: 10% white ratio or sharpness collapse
+    // Holo threshold: 20% (foil creates inherently higher white ratio than paper)
+    const wearThresh  = isHolo ? 0.20 : 0.10;
+    const sharpThresh = isHolo ? 2    : 4;
+
+    const hasWear = !suppressAll
+      && !c.isUniformBright
+      && (c.effectiveWear > wearThresh || c.avgSharp < sharpThresh);
+
+    if(hasWear){
       dings.push({
         side: sideLabel,
         type: "CORNER WEAR",
-        location: `${sideLabel} / ${name}`,
-        severity: effectiveWearRatio > 0.25 ? 3 : effectiveWearRatio > 0.15 ? 2 : 1,
-        desc: effectiveWearRatio > 0.25 ? "Significant corner wear" : effectiveWearRatio > 0.15 ? "Corner wear visible" : "Light corner wear",
+        location: `${sideLabel} / ${c.name}`,
+        severity: c.effectiveWear>0.25 ? 3 : c.effectiveWear>0.15 ? 2 : 1,
+        desc: c.effectiveWear>0.25 ? "Significant corner wear" : c.effectiveWear>0.15 ? "Corner wear visible" : "Light corner wear",
       });
     }
-    
-    details.push({ name, fray, fill, angle: side==="front" ? angle : undefined, whiteRatio: Math.round(effectiveWearRatio*1000)/10, sharpness: Math.round(avgSharp*10)/10, hasDing: hasWear, cropX:cx, cropY:cy, cropSize:cs });
+
+    details.push({
+      name: c.name, fray: c.fray, fill: c.fill,
+      angle: side==="front" ? c.angle : undefined,
+      whiteRatio: Math.round(c.effectiveWear*1000)/10,
+      sharpness: Math.round(c.avgSharp*10)/10,
+      hasDing: hasWear, cropX: c.cx, cropY: c.cy, cropSize: cs,
+    });
   }
-  
+
   return { dings, details };
 }
 
