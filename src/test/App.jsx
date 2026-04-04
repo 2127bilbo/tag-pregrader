@@ -292,11 +292,7 @@ function sampleEdgeColor(d, w, h, bn, edge) {
       rs.push(r); gs.push(g); bs.push(b);
     }
   }
-  const mid = arr => {
-    const a=[...arr].sort((a,b)=>a-b);
-    return a[Math.floor(a.length/2)];
-  };
-  const r=mid(rs), g=mid(gs), b=mid(bs);
+  const r=MED(rs), g=MED(gs), b=MED(bs);
   const dist=rs.map((_,i)=>Math.sqrt((rs[i]-r)**2+(gs[i]-g)**2+(bs[i]-b)**2));
   const mean=dist.reduce((s,v)=>s+v,0)/dist.length;
   const std=Math.sqrt(dist.reduce((s,v)=>s+(v-mean)**2,0)/dist.length);
@@ -346,11 +342,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
       dArr[dep]=dSum/PTS;
       gArr[dep]=gSum/PTS;
     }
-    const mid=arr=>{
-      const a=arr.filter(v=>typeof v==='number').sort((a,b)=>a-b);
-      return a.length?a[Math.floor(a.length/2)]:0;
-    };
-    const gMed=mid(gArr);
+    const gMed=MED(gArr.filter(v=>typeof v==='number'));
     const gThresh=Math.max(6, gMed*2.2);
     const minDepth=2;
     for(let dep=minDepth;dep<maxDepth-1;dep++){
@@ -372,17 +364,24 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
 }
 
 // ─── STEP 6: Full centering calculation ─────────────────────────────────────
-function detectCentering(d, w, h, bn) {
+function detectCentering(d, w, h, bn, scanData=null) {
+  const scanD = scanData || d;
   const cL=sampleEdgeColor(d,w,h,bn,'L'), cR=sampleEdgeColor(d,w,h,bn,'R');
   const cT=sampleEdgeColor(d,w,h,bn,'T'), cB=sampleEdgeColor(d,w,h,bn,'B');
-  const sL=scanBorderWidth(d,w,h,bn,'L',cL), sR=scanBorderWidth(d,w,h,bn,'R',cR);
-  const sT=scanBorderWidth(d,w,h,bn,'T',cT), sB=scanBorderWidth(d,w,h,bn,'B',cB);
-  const bL=sL.width,bR=sR.width,bT=sT.width,bB=sB.width;
+  const sL=scanBorderWidth(scanD,w,h,bn,'L',cL), sR=scanBorderWidth(scanD,w,h,bn,'R',cR);
+  const sT=scanBorderWidth(scanD,w,h,bn,'T',cT), sB=scanBorderWidth(scanD,w,h,bn,'B',cB);
+  const minDim=Math.min(bn.cardW,bn.cardH);
+  const minW=Math.max(2, Math.round(minDim*0.008));
+  const maxW=Math.round(minDim*0.28);
+  const clamp=(v)=>Math.max(minW,Math.min(maxW,v));
+  const bL=clamp(sL.width),bR=clamp(sR.width),bT=clamp(sT.width),bB=clamp(sB.width);
+  const clamped = (bL!==sL.width)||(bR!==sR.width)||(bT!==sT.width)||(bB!==sB.width);
   const lrT=bL+bR, tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
   const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
   const confs=[sL.confidence,sR.confidence,sT.confidence,sB.confidence];
-  const conf=confs.every(c=>c==='good')?'good':confs.filter(c=>c==='failed').length>=2?'failed':'low';
+  let conf=confs.every(c=>c==='good')?'good':confs.filter(c=>c==='failed').length>=2?'failed':'low';
+  if(conf==='good' && clamped) conf='low';
   return {bL,bR,bT,bB,lrRatio,tbRatio,colorL:cL,colorR:cR,colorT:cT,colorB:cB,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf};
 }
 
@@ -403,7 +402,8 @@ async function analyzeCard(src) {
   const dw=deskewed.width,dh=deskewed.height;
   const bounds=findBounds(dd.data,dw,dh);
   // Stages 5+6: centering on clean deskewed card
-  const centering=detectCentering(dd.data,dw,dh,bounds);
+  const blurred=blurImageData(dd.data,dw,dh,1);
+  const centering=detectCentering(dd.data,dw,dh,bounds,blurred);
   const displayUrl=deskewed.toDataURL('image/jpeg',0.92);
   return {displayUrl,dw,dh,bounds,centering,angle,angleResult,deskewApplied};
 }
