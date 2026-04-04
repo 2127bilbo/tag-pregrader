@@ -283,11 +283,17 @@ function detectCornerDings(d, w, h, bn, side) {
   const { left:cl, right:cr, top:ct, bottom:cb, cardW:cW, cardH:cH } = bn;
   const cs = Math.max(24, ~~(Math.min(cW, cH) * 0.09));
   const corners = [
-    { name:"TOP LEFT",     x:cl,    y:ct    },
-    { name:"TOP RIGHT",    x:cr-cs, y:ct    },
-    { name:"BOTTOM LEFT",  x:cl,    y:cb-cs },
-    { name:"BOTTOM RIGHT", x:cr-cs, y:cb-cs },
+    { name:"TOP LEFT",     x:cl,    y:ct,    tipDist:(dx,dy)=>dx+dy           },
+    { name:"TOP RIGHT",    x:cr-cs, y:ct,    tipDist:(dx,dy)=>(cs-dx)+dy      },
+    { name:"BOTTOM LEFT",  x:cl,    y:cb-cs, tipDist:(dx,dy)=>dx+(cs-dy)      },
+    { name:"BOTTOM RIGHT", x:cr-cs, y:cb-cs, tipDist:(dx,dy)=>(cs-dx)+(cs-dy) },
   ];
+
+  // Only sample pixels within this manhattan distance of the physical corner tip.
+  // Root cause of false positives: 72×72 scan box includes card artwork/text interiors.
+  // Mew EX bottom corners showed W:58-63% — not foil, but the card's light artwork background.
+  // Corner DINGS appear at the actual tip — not 70px into the card. Shrink to tip zone only.
+  const tipRadius = ~~(cs * 0.42);
 
   const dings = [];
   const details = [];
@@ -317,12 +323,13 @@ function detectCornerDings(d, w, h, bn, side) {
   const cardGVar = gN>0 ? gSq/gN-(gS/gN)**2 : 0;
   const isHolo = cardGVar > 800;
 
-  // ── Pass 1: measure every corner, store raw data ─────────────────────────
-  const cornerData = corners.map(({ name, x:cx, y:cy }) => {
+  // ── Pass 1: measure every corner tip, store raw data ────────────────────
+  const cornerData = corners.map(({ name, x:cx, y:cy, tipDist }) => {
     let whitePixels=0, colorDevPixels=0, totalPixels=0, sharpness=0, gradCount=0;
     let lSum=0, lSq=0, lN=0;
 
     for(let dy=0; dy<cs; dy++) for(let dx=0; dx<cs; dx++){
+      if(tipDist(dx,dy) > tipRadius) continue; // skip pixels far from corner tip
       const X=Math.min(w-1,Math.max(0,cx+dx)), Y=Math.min(h-1,Math.max(0,cy+dy));
       const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b);
       totalPixels++; lSum+=l; lSq+=l*l; lN++;
