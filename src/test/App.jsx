@@ -601,6 +601,30 @@ function CardPanel({label,side,onResult}){
             </div>
           ))}
         </div>
+        {debug&&result&&(
+          <div style={{marginTop:10}}>
+            <div style={{fontFamily:mono,fontSize:8,color:'#555',marginBottom:4}}>DEBUG DUMP</div>
+            <textarea
+              readOnly
+              value={JSON.stringify({
+                bounds: result.bounds,
+                angle: result.angle,
+                centering: {
+                  bL:c.bL,bR:c.bR,bT:c.bT,bB:c.bB,
+                  lrRatio:c.lrRatio,tbRatio:c.tbRatio,
+                  clamped:c.clamped,confidence:c.confidence
+                },
+                scans: {
+                  L: c.scanL.debug,
+                  R: c.scanR.debug,
+                  T: c.scanT.debug,
+                  B: c.scanB.debug
+                }
+              }, null, 2)}
+              style={{width:'100%',height:140,background:'#0a0a0a',border:'1px solid #222',borderRadius:6,color:'#aaa',fontFamily:mono,fontSize:9,padding:8,resize:'vertical'}}
+            />
+          </div>
+        )}
       </div>}
     </div>
   );
