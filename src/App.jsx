@@ -38,59 +38,91 @@ const PX    = (d,w,x,y) => { const i=(y*w+x)*4; return [d[i],d[i+1],d[i+2]]; };
 const LUM   = (r,g,b)   => .299*r + .587*g + .114*b;
 const CLAMP = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
 
-// ─── STEP 1: Card boundary detection (proven grid-variance method) ───────────
+// ─── STEP 1: Card boundary detection ─────────────────────────────────────────
+// Strategy: sample background color from image corners, then scan inward from
+// each image edge until pixels stop matching background = card edge found.
+// This works on white, black, gray, any solid background. Doesn't get confused
+// by deskew rotation artifacts (dark triangles in corners) because we're looking
+// for where the CARD starts, not where high-variance regions are.
 function findBounds(d, w, h) {
-  const GX=32, GY=32;
-  const cellW=Math.floor(w/GX), cellH=Math.floor(h/GY);
-  if (cellW<2||cellH<2) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
-  const vg=[]; let maxV=0;
-  for (let gy=0;gy<GY;gy++) {
-    vg[gy]=[];
-    for (let gx=0;gx<GX;gx++) {
-      let s=0,sq=0,n=0;
-      const x0=gx*cellW,y0=gy*cellH;
-      const step=Math.max(1,Math.floor(Math.min(cellW,cellH)/5));
-      for(let y=y0;y<y0+cellH&&y<h;y+=step)
-        for(let x=x0;x<x0+cellW&&x<w;x+=step)
-          { const v=LUM(...PX(d,w,x,y)); s+=v; sq+=v*v; n++; }
-      const variance=n>0?sq/n-(s/n)**2:0;
-      vg[gy][gx]=variance; if(variance>maxV) maxV=variance;
+  // Sample background from 4 image corners, 10x10 patch each
+  const PATCH=10;
+  let bgR=0,bgG=0,bgB=0,bgN=0;
+  const corners=[[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]];
+  for(const [cx,cy] of corners){
+    for(let dy=0;dy<PATCH;dy++) for(let dx=0;dx<PATCH;dx++){
+      const [r,g,b]=PX(d,w,CLAMP(cx+dx,0,w-1),CLAMP(cy+dy,0,h-1));
+      bgR+=r;bgG+=g;bgB+=b;bgN++;
     }
   }
+  bgR/=bgN; bgG/=bgN; bgB/=bgN;
+  const bgDist=(r,g,b)=>Math.sqrt((r-bgR)**2+(g-bgG)**2+(b-bgB)**2);
+
+  // Tolerance: how different a pixel must be from background to be "card"
+  // 35 handles white paper vs white card border (subtle), 
+  // but also works for dark backgrounds vs dark cards
+  const TOL=35;
+
+  // For each scan position, average across N samples perpendicular to scan direction
+  // to avoid being fooled by a single dark pixel or dust
+  const N=20;
+  const scanAvg=(dir,pos)=>{
+    let dist=0;
+    for(let i=0;i<N;i++){
+      const f=0.25+0.5*i/(N-1); // sample middle 50% to avoid corner artifacts
+      let px,py;
+      if(dir==='L'){px=pos;py=Math.round(h*f);}
+      if(dir==='R'){px=pos;py=Math.round(h*f);}
+      if(dir==='T'){px=Math.round(w*f);py=pos;}
+      if(dir==='B'){px=Math.round(w*f);py=pos;}
+      px=CLAMP(px,0,w-1);py=CLAMP(py,0,h-1);
+      const [r,g,b]=PX(d,w,px,py);
+      dist+=bgDist(r,g,b);
+    }
+    return dist/N;
+  };
+
+  // Scan inward from each image edge — first position where avg dist > TOL = card edge
+  let left=0,right=w-1,top=0,bottom=h-1;
+  const maxScan=Math.min(w,h)*0.45; // don't scan more than 45% in
+  for(let x=0;x<maxScan;x++)  if(scanAvg('L',x)>TOL){left=x;break;}
+  for(let x=w-1;x>w-maxScan;x--) if(scanAvg('R',x)>TOL){right=x;break;}
+  for(let y=0;y<maxScan;y++)  if(scanAvg('T',y)>TOL){top=y;break;}
+  for(let y=h-1;y>h-maxScan;y--) if(scanAvg('B',y)>TOL){bottom=y;break;}
+
+  const cardW=right-left, cardH=bottom-top;
+
+  // Sanity check: result must be card-shaped (ratio 0.55–0.85) and reasonably sized
+  const ratio=cardW/cardH;
+  if(cardW>w*0.10 && cardH>h*0.10 && ratio>0.55 && ratio<0.85){
+    return {left,right,top,bottom,cardW,cardH};
+  }
+
+  // Fallback: variance-based grid method (works well when no clear background)
+  return varianceFallback(d,w,h);
+}
+
+function varianceFallback(d,w,h){
+  // Grid variance — original proven method, now as fallback
+  const GX=32,GY=32;
+  const cellW=Math.floor(w/GX),cellH=Math.floor(h/GY);
+  if(cellW<2||cellH<2) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
+  const vg=[];let maxV=0;
+  for(let gy=0;gy<GY;gy++){vg[gy]=[];for(let gx=0;gx<GX;gx++){
+    let s=0,sq=0,n=0;const x0=gx*cellW,y0=gy*cellH;
+    const step=Math.max(1,Math.floor(Math.min(cellW,cellH)/5));
+    for(let y=y0;y<y0+cellH&&y<h;y+=step)for(let x=x0;x<x0+cellW&&x<w;x+=step){const v=LUM(...PX(d,w,x,y));s+=v;sq+=v*v;n++;}
+    const variance=n>0?sq/n-(s/n)**2:0;vg[gy][gx]=variance;if(variance>maxV)maxV=variance;
+  }}
   const floor=Math.max(30,maxV*0.12);
   let minGX=GX,maxGX=-1,minGY=GY,maxGY=-1,count=0;
-  for(let gy=0;gy<GY;gy++) for(let gx=0;gx<GX;gx++)
-    if(vg[gy][gx]>floor){
-      if(gx<minGX)minGX=gx;if(gx>maxGX)maxGX=gx;
-      if(gy<minGY)minGY=gy;if(gy>maxGY)maxGY=gy;count++;
-    }
-  if(count<6||maxGX<minGX||maxGY<minGY) return edgeFallback(d,w,h);
-  let left=minGX*cellW,right=Math.min(w-1,(maxGX+1)*cellW);
-  let top=minGY*cellH,bottom=Math.min(h-1,(maxGY+1)*cellH);
-  const scanLimit=Math.min(cellW*2,60),sampleN=16;
-  const edgeLum=(axis,pos,lo,hi)=>{let s=0;for(let i=0;i<sampleN;i++){const f=lo+(hi-lo)*(i+.5)/sampleN;const px=axis==='x'?Math.round(pos):Math.round(f);const py=axis==='x'?Math.round(f):Math.round(pos);s+=LUM(...PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1)));}return s/sampleN;};
-  let bc=0,bp=left; for(let i=0;i<scanLimit;i++){const x=left+i;if(x>=right-10)break;const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x-1,top,bottom));if(c>bc){bc=c;bp=x;}} left=bp;
-  bc=0;bp=right; for(let i=0;i<scanLimit;i++){const x=right-i;if(x<=left+10)break;const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x+1,top,bottom));if(c>bc){bc=c;bp=x;}} right=bp;
-  bc=0;bp=top;   for(let i=0;i<scanLimit;i++){const y=top+i;if(y>=bottom-10)break;const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y-1,left,right));if(c>bc){bc=c;bp=y;}} top=bp;
-  bc=0;bp=bottom;for(let i=0;i<scanLimit;i++){const y=bottom-i;if(y<=top+10)break;const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y+1,left,right));if(c>bc){bc=c;bp=y;}} bottom=bp;
-  const cardW=right-left,cardH=bottom-top;
-  if(cardW>w*0.08&&cardH>h*0.08) return {left,right,top,bottom,cardW,cardH};
-  return edgeFallback(d,w,h);
-}
-function edgeFallback(d,w,h){
-  const thresholds=[15,25,40,60];let best=null,bestArea=0;
-  for(const t of thresholds){
-    let l=0,r=w-1,tp=0,b=h-1;
-    const rV=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,Math.min(w-1,x),y));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
-    const cV=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,x,Math.min(h-1,y)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
-    for(let x=0;x<w*.4;x++)if(cV(x,~~(h*.1),~~(h*.9))>t){l=x;break;}
-    for(let x=w-1;x>w*.6;x--)if(cV(x,~~(h*.1),~~(h*.9))>t){r=x;break;}
-    for(let y=0;y<h*.4;y++)if(rV(y,~~(w*.1),~~(w*.9))>t){tp=y;break;}
-    for(let y=h-1;y>h*.6;y--)if(rV(y,~~(w*.1),~~(w*.9))>t){b=y;break;}
-    const area=(r-l)*(b-tp);
-    if(area>bestArea&&(r-l)>w*0.15&&(b-tp)>h*0.15){bestArea=area;best={left:l,right:r,top:tp,bottom:b,cardW:r-l,cardH:b-tp};}
+  for(let gy=0;gy<GY;gy++)for(let gx=0;gx<GX;gx++)if(vg[gy][gx]>floor){
+    if(gx<minGX)minGX=gx;if(gx>maxGX)maxGX=gx;if(gy<minGY)minGY=gy;if(gy>maxGY)maxGY=gy;count++;
   }
-  return best||{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
+  if(count<6||maxGX<minGX||maxGY<minGY) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
+  const left=minGX*cellW,right=Math.min(w-1,(maxGX+1)*cellW);
+  const top=minGY*cellH,bottom=Math.min(h-1,(maxGY+1)*cellH);
+  return {left,right,top,bottom,cardW:right-left,cardH:bottom-top};
 }
 
 // ─── STEP 2: Detect card rotation angle ─────────────────────────────────────
