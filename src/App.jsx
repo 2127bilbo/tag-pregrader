@@ -334,7 +334,217 @@ function refineBoundsByGradient(d,w,h,bn){
   return null;
 }
 
-// STEP 4: Sample border color from card edge ──────────────────────────────
+// 
+function makeEdgeMap(d,w,h){
+  const out = new Uint8ClampedArray(d.length);
+  const L=(y,x)=>LUM(d[(y*w+x)*4],d[(y*w+x)*4+1],d[(y*w+x)*4+2]);
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+    const gx=-L(y-1,x-1)+L(y-1,x+1)-2*L(y,x-1)+2*L(y,x+1)-L(y+1,x-1)+L(y+1,x+1);
+    const gy=-L(y-1,x-1)-2*L(y-1,x)-L(y-1,x+1)+L(y+1,x-1)+2*L(y+1,x)+L(y+1,x+1);
+    const m=Math.min(255,Math.sqrt(gx*gx+gy*gy));
+    const i=(y*w+x)*4;
+    out[i]=out[i+1]=out[i+2]=m; out[i+3]=255;
+  }
+  return out;
+}
+
+function findBoundsV2(d, w, h) {
+  const GX = 32, GY = 32;
+  const cellW = Math.floor(w / GX), cellH = Math.floor(h / GY);
+  if (cellW < 2 || cellH < 2) return { left:0, right:w-1, top:0, bottom:h-1, cardW:w-1, cardH:h-1, method:'v2-var' };
+
+  const vg = [];
+  let maxV = 0;
+  for (let gy = 0; gy < GY; gy++) {
+    vg[gy] = [];
+    for (let gx = 0; gx < GX; gx++) {
+      let s=0, sq=0, n=0;
+      const x0=gx*cellW, y0=gy*cellH;
+      const step = Math.max(1, Math.floor(Math.min(cellW,cellH)/5));
+      for (let y=y0; y<y0+cellH && y<h; y+=step)
+        for (let x=x0; x<x0+cellW && x<w; x+=step)
+          { const v=LUM(...PX(d,w,x,y)); s+=v; sq+=v*v; n++; }
+      const variance = n>0 ? sq/n-(s/n)**2 : 0;
+      vg[gy][gx] = variance;
+      if (variance > maxV) maxV = variance;
+    }
+  }
+
+  const floor = Math.max(30, maxV * 0.12);
+  let minGX=GX, maxGX=-1, minGY=GY, maxGY=-1, count=0;
+  for (let gy=0; gy<GY; gy++)
+    for (let gx=0; gx<GX; gx++)
+      if (vg[gy][gx] > floor) {
+        if (gx < minGX) minGX=gx; if (gx > maxGX) maxGX=gx;
+        if (gy < minGY) minGY=gy; if (gy > maxGY) maxGY=gy;
+        count++;
+      }
+
+  if (count < 6 || maxGX < minGX || maxGY < minGY) {
+    return edgeScanFallbackV2(d, w, h);
+  }
+
+  let left   = minGX * cellW;
+  let right  = Math.min(w-1, (maxGX+1) * cellW);
+  let top    = minGY * cellH;
+  let bottom = Math.min(h-1, (maxGY+1) * cellH);
+
+  const scanLimit = Math.min(cellW*2, 60);
+  const sampleN = 16;
+
+  const edgeLum = (axis, pos, lo, hi) => {
+    let s=0;
+    for (let i=0; i<sampleN; i++) {
+      const f = lo + (hi-lo)*(i+0.5)/sampleN;
+      const px = axis==='x' ? Math.round(pos) : Math.round(f);
+      const py = axis==='x' ? Math.round(f)   : Math.round(pos);
+      s += LUM(...PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1)));
+    }
+    return s/sampleN;
+  };
+
+  let bestContrast=0, bestPos=left;
+  for (let i=0; i<scanLimit; i++) {
+    const x=left+i; if(x>=right-10) break;
+    const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x-1,top,bottom));
+    if(c>bestContrast){bestContrast=c;bestPos=x;}
+  }
+  left=bestPos;
+
+  bestContrast=0; bestPos=right;
+  for (let i=0; i<scanLimit; i++) {
+    const x=right-i; if(x<=left+10) break;
+    const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x+1,top,bottom));
+    if(c>bestContrast){bestContrast=c;bestPos=x;}
+  }
+  right=bestPos;
+
+  bestContrast=0; bestPos=top;
+  for (let i=0; i<scanLimit; i++) {
+    const y=top+i; if(y>=bottom-10) break;
+    const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y-1,left,right));
+    if(c>bestContrast){bestContrast=c;bestPos=y;}
+  }
+  top=bestPos;
+
+  bestContrast=0; bestPos=bottom;
+  for (let i=0; i<scanLimit; i++) {
+    const y=bottom-i; if(y<=top+10) break;
+    const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y+1,left,right));
+    if(c>bestContrast){bestContrast=c;bestPos=y;}
+  }
+  bottom=bestPos;
+
+  const cardW=right-left, cardH=bottom-top;
+  if (cardW > w*0.08 && cardH > h*0.08) {
+    return { left, right, top, bottom, cardW, cardH, method:'v2-var' };
+  }
+
+  return edgeScanFallbackV2(d, w, h);
+}
+
+function edgeScanFallbackV2(d, w, h) {
+  const thresholds = [15, 25, 40, 60];
+  let best=null, bestArea=0;
+  for (const t of thresholds) {
+    let l=0, r=w-1, tp=0, b=h-1;
+    const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    for(let x=0;x<w*.4;x++) if(colVar(x,~~(h*.1),~~(h*.9))>t){l=x;break;}
+    for(let x=w-1;x>w*.6;x--) if(colVar(x,~~(h*.1),~~(h*.9))>t){r=x;break;}
+    for(let y=0;y<h*.4;y++) if(rowVar(y,~~(w*.1),~~(w*.9))>t){tp=y;break;}
+    for(let y=h-1;y>h*.6;y--) if(rowVar(y,~~(w*.1),~~(w*.9))>t){b=y;break;}
+    const area=(r-l)*(b-tp);
+    if(area>bestArea&&(r-l)>w*0.15&&(b-tp)>h*0.15){bestArea=area;best={left:l,right:r,top:tp,bottom:b,cardW:r-l,cardH:b-tp,method:'v2-edge'};}
+  }
+  return best||{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method:'v2-edge'};
+}
+
+function scanBorderFromEdgeV2(d, w, h, dir, edgeCoord, along0, along1) {
+  const sampleN = 20;
+  const maxScan = Math.round(Math.abs(along1-along0) * 0.18);
+  const sample = (depth) => {
+    let s = 0;
+    for(let i=0; i<sampleN; i++){
+      const f = along0 + (along1-along0)*(i+0.5)/sampleN;
+      let px, py;
+      if(dir==='L')      { px=edgeCoord+depth; py=Math.round(f); }
+      else if(dir==='R') { px=edgeCoord-depth; py=Math.round(f); }
+      else if(dir==='T') { px=Math.round(f);   py=edgeCoord+depth; }
+      else               { px=Math.round(f);   py=edgeCoord-depth; }
+      s += LUM(...PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1)));
+    }
+    return s/sampleN;
+  };
+  const edgeLum = (sample(0)+sample(1)+sample(2))/3;
+  const tolerance = 20;
+  for(let dep=3; dep<maxScan; dep++){
+    if(Math.abs(sample(dep)-edgeLum) > tolerance) return dep;
+  }
+  return 0;
+}
+
+function analyzeCenteringV2(edgeD, origD, w, h, bn){
+  const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
+  const thresholds = [50, 100, 150, 200, 300, 500];
+  const validResults = [];
+  const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(edgeD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+  const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(edgeD,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+
+  for (const vT of thresholds) {
+    let bL=0,bR=0,bT=0,bB=0;
+    for(let x=cl+~~(cW*.01);x<cl+~~(cW*.25);x++) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bL=x-cl;break;}
+    for(let x=cr-~~(cW*.01);x>cr-~~(cW*.25);x--) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bR=cr-x;break;}
+    for(let y=ct+~~(cH*.01);y<ct+~~(cH*.25);y++) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bT=y-ct;break;}
+    for(let y=cb-~~(cH*.01);y>cb-~~(cH*.25);y--) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bB=cb-y;break;}
+    if (bL > 0 && bR > 0 && bT > 0 && bB > 0) {
+      const lrTotal = bL+bR, tbTotal = bT+bB;
+      const lrPct = lrTotal/cW, tbPct = tbTotal/cH;
+      if (lrPct > 0.01 && lrPct < 0.35 && tbPct > 0.01 && tbPct < 0.35) {
+        validResults.push({ borderL:bL, borderR:bR, borderT:bT, borderB:bB });
+      }
+    }
+  }
+
+  let bestResult = null;
+  if (validResults.length > 0) {
+    const med = arr => { const s=[...arr].sort((a,b)=>a-b); const m=~~(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
+    bestResult = {
+      borderL: med(validResults.map(r=>r.borderL)),
+      borderR: med(validResults.map(r=>r.borderR)),
+      borderT: med(validResults.map(r=>r.borderT)),
+      borderB: med(validResults.map(r=>r.borderB)),
+    };
+  }
+
+  let mode='mode1';
+  if(!bestResult) {
+    const bL = scanBorderFromEdgeV2(origD,w,h,'L',cl,ct+~~(cH*.1),cb-~~(cH*.1));
+    const bR = scanBorderFromEdgeV2(origD,w,h,'R',cr,ct+~~(cH*.1),cb-~~(cH*.1));
+    const bT = scanBorderFromEdgeV2(origD,w,h,'T',ct,cl+~~(cW*.1),cr-~~(cW*.1));
+    const bB = scanBorderFromEdgeV2(origD,w,h,'B',cb,cl+~~(cW*.1),cr-~~(cW*.1));
+    const lrTot=bL+bR, tbTot=bT+bB;
+    const lrPct=lrTot/cW, tbPct=tbTot/cH;
+    if(bL>0&&bR>0&&bT>0&&bB>0 && lrPct>0.01&&lrPct<0.18 && tbPct>0.01&&tbPct<0.18){
+      bestResult = { borderL:bL, borderR:bR, borderT:bT, borderB:bB };
+      mode='mode2';
+    }
+  }
+
+  if (!bestResult) {
+    bestResult = { borderL: ~~(cW*0.05), borderR: ~~(cW*0.05), borderT: ~~(cH*0.07), borderB: ~~(cH*0.07) };
+    mode='fallback';
+  }
+
+  const {borderL:bL,borderR:bR,borderT:bT,borderB:bB} = bestResult;
+  const tLR=bL+bR, tTB=bT+bB;
+  const lrRatio = Math.round((tLR>0?(bL/tLR)*100:50)*10)/10;
+  const tbRatio = Math.round((tTB>0?(bT/tTB)*100:50)*10)/10;
+
+  return { bL,bR,bT,bB,lrRatio,tbRatio,mode };
+}
+
+STEP 4: Sample border color from card edge ──────────────────────────────
 // Sample the outermost pixels of the detected card on each side.
 // This is the "ground truth" border color under current lighting conditions —
 // works on blue card backs, white/silver fronts, dark WOTC borders, all of them.
@@ -473,14 +683,26 @@ async function analyzeCard(src) {
   const dc=deskewed.getContext('2d',{willReadFrequently:true});
   const dd=dc.getImageData(0,0,deskewed.width,deskewed.height);
   const dw=deskewed.width,dh=deskewed.height;
-  const bounds=findBounds(dd.data,dw,dh);
-  const refined=refineBoundsByGradient(dd.data,dw,dh,bounds);
-  const finalBounds=refined||bounds;
+  const edgeMap=makeEdgeMap(dd.data,dw,dh);
+  const bounds=findBoundsV2(edgeMap,dw,dh);
   // Stages 5+6: centering on clean deskewed card
-  const blurred=blurImageData(dd.data,dw,dh,1);
-  const centering=detectCentering(dd.data,dw,dh,finalBounds,blurred);
+  const centering=analyzeCenteringV2(edgeMap,dd.data,dw,dh,bounds);
+  const cL=sampleEdgeColor(dd.data,dw,dh,bounds,'L'), cR=sampleEdgeColor(dd.data,dw,dh,bounds,'R');
+  const cT=sampleEdgeColor(dd.data,dw,dh,bounds,'T'), cB=sampleEdgeColor(dd.data,dw,dh,bounds,'B');
+  const scanStub = (w,mode)=>({width:w,confidence:mode==='fallback'?'failed':mode==='mode2'?'low':'good',debug:{mode}});
+  const centeringFull={
+    bL:centering.bL,bR:centering.bR,bT:centering.bT,bB:centering.bB,
+    lrRatio:centering.lrRatio,tbRatio:centering.tbRatio,
+    colorL:cL,colorR:cR,colorT:cT,colorB:cB,
+    scanL:scanStub(centering.bL,centering.mode),
+    scanR:scanStub(centering.bR,centering.mode),
+    scanT:scanStub(centering.bT,centering.mode),
+    scanB:scanStub(centering.bB,centering.mode),
+    confidence:centering.mode==='fallback'?'low':centering.mode==='mode2'?'low':'good',
+    clamped:false
+  };
   const displayUrl=deskewed.toDataURL('image/jpeg',0.92);
-  return {displayUrl,dw,dh,bounds:finalBounds,centering,angle,angleResult,deskewApplied};
+  return {displayUrl,dw,dh,bounds,centering:centeringFull,angle,angleResult,deskewApplied};
 }
 
 // ─── Overlay ─────────────────────────────────────────────────────────────────
