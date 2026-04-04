@@ -37,6 +37,30 @@ function loadImg(src, mx=1400) {
 const PX    = (d,w,x,y) => { const i=(y*w+x)*4; return [d[i],d[i+1],d[i+2]]; };
 const LUM   = (r,g,b)   => .299*r + .587*g + .114*b;
 const CLAMP = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
+const MED   = arr => { const a=[...arr].sort((a,b)=>a-b); return a.length?a[Math.floor(a.length/2)]:0; };
+const BLUR_RADIUS = 1;
+
+function blurImageData(src, w, h, radius=BLUR_RADIUS){
+  if(radius<=0) return src;
+  const dst = new Uint8ClampedArray(src.length);
+  const r=radius;
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      let rs=0,gs=0,bs=0,ns=0;
+      for(let dy=-r;dy<=r;dy++){
+        const yy=CLAMP(y+dy,0,h-1);
+        for(let dx=-r;dx<=r;dx++){
+          const xx=CLAMP(x+dx,0,w-1);
+          const i=(yy*w+xx)*4;
+          rs+=src[i]; gs+=src[i+1]; bs+=src[i+2]; ns++;
+        }
+      }
+      const o=(y*w+x)*4;
+      dst[o]=rs/ns; dst[o+1]=gs/ns; dst[o+2]=bs/ns; dst[o+3]=255;
+    }
+  }
+  return dst;
+}
 
 // ─── STEP 1: Card boundary detection ─────────────────────────────────────────
 // Background-color approach: sample corners for paper/background color,
@@ -103,6 +127,8 @@ function findBounds(d, w, h) {
   if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
     return {left,right,top,bottom,cardW,cardH};
   }
+  const gBounds=gradientFallback(d,w,h);
+  if(gBounds) return gBounds;
   return varianceFallback(d,w,h);
 }
 
@@ -127,6 +153,55 @@ function varianceFallback(d,w,h){
   const left=minGX*cellW,right=Math.min(w-1,(maxGX+1)*cellW);
   const top=minGY*cellH,bottom=Math.min(h-1,(maxGY+1)*cellH);
   return {left,right,top,bottom,cardW:right-left,cardH:bottom-top};
+}
+
+function gradientFallback(d,w,h){
+  const maxScan=Math.min(w,h)*0.45;
+  const N=28;
+  const scanGrad=(dir,pos)=>{
+    let g=0;
+    for(let i=0;i<N;i++){
+      const f=0.25+0.5*i/(N-1);
+      let x,y;
+      if(dir==='L'||dir==='R'){x=pos; y=Math.round(h*f);}
+      else {x=Math.round(w*f); y=pos;}
+      const xm=CLAMP(x-1,0,w-1), xp=CLAMP(x+1,0,w-1);
+      const ym=CLAMP(y-1,0,h-1), yp=CLAMP(y+1,0,h-1);
+      const gx=LUM(...PX(d,w,xp,y))-LUM(...PX(d,w,xm,y));
+      const gy=LUM(...PX(d,w,x,yp))-LUM(...PX(d,w,x,ym));
+      g+=Math.abs(gx)+Math.abs(gy);
+    }
+    return g/N;
+  };
+  const samples=12;
+  const baseL=[],baseR=[],baseT=[],baseB=[];
+  for(let i=0;i<samples;i++){
+    baseL.push(scanGrad('L',i));
+    baseR.push(scanGrad('R',w-1-i));
+    baseT.push(scanGrad('T',i));
+    baseB.push(scanGrad('B',h-1-i));
+  }
+  const base = arr => {
+    const m=MED(arr);
+    const mean=arr.reduce((s,v)=>s+v,0)/arr.length;
+    const std=Math.sqrt(arr.reduce((s,v)=>s+(v-mean)**2,0)/arr.length);
+    return {m,std};
+  };
+  const bL=base(baseL), bR=base(baseR), bT=base(baseT), bB=base(baseB);
+  const thresh = b => Math.max(6, b.m + b.std*3.0);
+
+  let left=0,right=w-1,top=0,bottom=h-1;
+  const lt=thresh(bL), rt=thresh(bR), tt=thresh(bT), bt=thresh(bB);
+  for(let x=0;x<maxScan;x++)     if(scanGrad('L',x)>lt){left=x;break;}
+  for(let x=w-1;x>w-maxScan;x--) if(scanGrad('R',x)>rt){right=x;break;}
+  for(let y=0;y<maxScan;y++)     if(scanGrad('T',y)>tt){top=y;break;}
+  for(let y=h-1;y>h-maxScan;y--) if(scanGrad('B',y)>bt){bottom=y;break;}
+  const cardW=right-left,cardH=bottom-top;
+  const ratio=cardW/cardH;
+  if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
+    return {left,right,top,bottom,cardW,cardH};
+  }
+  return null;
 }
 
 // ─── STEP 2: Detect card rotation angle ─────────────────────────────────────
@@ -196,103 +271,119 @@ function deskewCanvas(srcCanvas, angle) {
   return c;
 }
 
-// ─── STEP 4+5: Gradient-based border width detection ─────────────────────────
-// Root cause of color-matching failure (confirmed from 14-card dataset):
-//   - T always 22px: foil variation causes false early trigger
-//   - L always 252px (maxDepth): foil border color matches light artwork interior
-//   - B 84-234px: bottom text box matches dark foil bottom edge color
-//   - Color of border can match artwork color — no threshold value fixes this
-//
-// The gradient approach is color-agnostic:
-//   The border-to-artwork transition is a PRINTED PHYSICAL EDGE.
-//   It always produces a spike in gradient magnitude regardless of colors.
-//   Find the peak gradient position between 5-18% of card dimension = border width.
-//
-// For full-art cards with no visible border: gradient peak will be near 0,
-// indicating foil-only margin (a few px). Reported as thin border.
-
-function pixelGrad(d, w, h, x, y) {
-  // Sobel magnitude at pixel (x,y)
-  const l = LUM(...PX(d,w,CLAMP(x-1,0,w-1),y));
-  const r = LUM(...PX(d,w,CLAMP(x+1,0,w-1),y));
-  const u = LUM(...PX(d,w,x,CLAMP(y-1,0,h-1)));
-  const dn= LUM(...PX(d,w,x,CLAMP(y+1,0,h-1)));
-  return Math.sqrt((r-l)**2+(dn-u)**2);
+// ─── STEP 4: Sample border color from card edge ──────────────────────────────
+// Sample the outermost pixels of the detected card on each side.
+// This is the "ground truth" border color under current lighting conditions —
+// works on blue card backs, white/silver fronts, dark WOTC borders, all of them.
+function sampleEdgeColor(d, w, h, bn, edge) {
+  const {left:cl,right:cr,top:ct,cardW:cW,cardH:cH}=bn; const cb=ct+cH;
+  const STRIP=5, N=28;
+  const rs=[],gs=[],bs=[];
+  for(let i=0;i<N;i++){
+    const f=0.30+0.40*i/(N-1); // center 40% of each edge — avoids corners
+    for(let s=0;s<STRIP;s++){
+      let px,py;
+      if(edge==='L'){px=cl+s;                py=Math.round(ct+cH*f);}
+      if(edge==='R'){px=CLAMP(cr-s,0,w-1);   py=Math.round(ct+cH*f);}
+      if(edge==='T'){px=Math.round(cl+cW*f); py=ct+s;}
+      if(edge==='B'){px=Math.round(cl+cW*f); py=CLAMP(cb-s,0,h-1);}
+      px=CLAMP(px,0,w-1); py=CLAMP(py,0,h-1);
+      const [r,g,b]=PX(d,w,px,py);
+      rs.push(r); gs.push(g); bs.push(b);
+    }
+  }
+  const mid = arr => {
+    const a=[...arr].sort((a,b)=>a-b);
+    return a[Math.floor(a.length/2)];
+  };
+  const r=mid(rs), g=mid(gs), b=mid(bs);
+  const dist=rs.map((_,i)=>Math.sqrt((rs[i]-r)**2+(gs[i]-g)**2+(bs[i]-b)**2));
+  const mean=dist.reduce((s,v)=>s+v,0)/dist.length;
+  const std=Math.sqrt(dist.reduce((s,v)=>s+(v-mean)**2,0)/dist.length);
+  return {r,g,b,std};
 }
 
-function scanBorderWidth(d, w, h, bn, edge) {
+// ─── STEP 5: Scan border width ───────────────────────────────────────────────
+// Scan inward from the card edge. At each depth, sample 11 points across
+// the middle section of that edge. When the color diverges from the sampled
+// border color by more than the tolerance, we've crossed into artwork.
+// Run 9 parallel scan lines and take the median — robust against corner
+// rounding, pokeball highlights, holo shimmer, text elements near borders.
+function scanBorderWidth(d, w, h, bn, edge, borderColor) {
   const {left:cl,right:cr,top:ct,cardW:cW,cardH:cH}=bn; const cb=ct+cH;
+  const maxDepth=Math.round(Math.min(cW,cH)*0.22);
+  const LINES=9, PTS=11;
+  const {r:br,g:bg,b:bb}=borderColor;
+  const colorDist=(r,g,b)=>Math.sqrt((r-br)**2+(g-bg)**2+(b-bb)**2);
+  const distThresh=Math.max(12, (borderColor.std||0)*2.2);
 
-  // Search range: 3px to 18% of card dimension
-  // Skip outer 3px to avoid card edge artifact,
-  // stop at 18% so we don't detect interior artwork features
-  const minDep = 3;
-  const maxDep = Math.round(Math.min(cW,cH) * 0.18);
-
-  // Sample PTS points spread across center 60% of edge for robustness
-  // Run LINES independent scans and take the median peak position
-  const LINES = 11, PTS = 13;
-
-  const lineResults = [];
-
-  for (let li=0; li<LINES; li++) {
-    // Spread scan lines across 15-85% of edge length
-    // (avoids corner regions which have rounded edges and extra gradients)
-    // Each line is an INDEPENDENT scan at a different along-edge position
-    const frac = 0.15 + 0.70*(li/(LINES-1));
-
-    let peakGrad = 0, peakDep = minDep;
-
-    for (let dep=minDep; dep<=maxDep; dep++) {
-      let gSum = 0;
-      // Average gradient across PTS perpendicular samples at this depth
-      for (let pi=0; pi<PTS; pi++) {
-        const sp = 0.25 + 0.50*(pi/(PTS-1));
+  const results=[];
+  for(let li=0;li<LINES;li++){
+    const frac=0.15+0.70*(li/(LINES-1));
+    let hit=maxDepth;
+    const gArr=[], dArr=[];
+    for(let dep=1;dep<maxDepth-1;dep++){
+      let dSum=0, gSum=0;
+      for(let pi=0;pi<PTS;pi++){
+        const sp=0.25+0.50*(pi/(PTS-1));
         let px,py;
         if(edge==='L'){px=cl+dep; py=Math.round(ct+cH*sp);}
         if(edge==='R'){px=CLAMP(cr-dep,0,w-1); py=Math.round(ct+cH*sp);}
         if(edge==='T'){px=Math.round(cl+cW*sp); py=ct+dep;}
         if(edge==='B'){px=Math.round(cl+cW*sp); py=CLAMP(cb-dep,0,h-1);}
         px=CLAMP(px,0,w-1); py=CLAMP(py,0,h-1);
-        gSum += pixelGrad(d,w,h,px,py);
+        const [r,g,b]=PX(d,w,px,py); dSum+=colorDist(r,g,b);
+        let g1,g2;
+        if(edge==='L' || edge==='R'){
+          g1=LUM(...PX(d,w,CLAMP(px-1,0,w-1),py));
+          g2=LUM(...PX(d,w,CLAMP(px+1,0,w-1),py));
+        }else{
+          g1=LUM(...PX(d,w,px,CLAMP(py-1,0,h-1)));
+          g2=LUM(...PX(d,w,px,CLAMP(py+1,0,h-1)));
+        }
+        gSum+=Math.abs(g2-g1);
       }
-      const avgGrad = gSum/PTS;
-      if (avgGrad > peakGrad) { peakGrad=avgGrad; peakDep=dep; }
+      dArr[dep]=dSum/PTS;
+      gArr[dep]=gSum/PTS;
     }
-
-    lineResults.push({ dep: peakDep, grad: peakGrad });
+    const mid=arr=>{
+      const a=arr.filter(v=>typeof v==='number').sort((a,b)=>a-b);
+      return a.length?a[Math.floor(a.length/2)]:0;
+    };
+    const gMed=mid(gArr);
+    const gThresh=Math.max(6, gMed*2.2);
+    const minDepth=2;
+    for(let dep=minDepth;dep<maxDepth-1;dep++){
+      if(gArr[dep]>gThresh && dArr[dep]>distThresh*0.7){hit=dep;break;}
+    }
+    if(hit===maxDepth){
+      let bestDep=maxDepth, bestG=0;
+      for(let dep=minDepth;dep<maxDepth-1;dep++){
+        if(gArr[dep]>bestG){bestG=gArr[dep];bestDep=dep;}
+      }
+      if(bestG>gThresh*1.1) hit=bestDep;
+    }
+    results.push(hit);
   }
-
-  // Sort by depth and take median peak position
-  const depths = lineResults.map(r=>r.dep).sort((a,b)=>a-b);
-  const medDep = depths[Math.floor(LINES/2)];
-
-  // Median peak gradient strength — low = no clear border (full-art card)
-  const grads = lineResults.map(r=>r.grad).sort((a,b)=>a-b);
-  const medGrad = grads[Math.floor(LINES/2)];
-
-  // Confidence: is the gradient peak strong enough to be a real border edge?
-  // Weak peaks (<8) = full-art / foil-only margin
-  // Strong peaks (>15) = clear printed border
-  const confidence = medGrad > 15 ? 'good' : medGrad > 8 ? 'low' : 'failed';
-
-  return { width:medDep, peakGrad:Math.round(medGrad*10)/10, confidence };
+  results.sort((a,b)=>a-b);
+  const med=results[Math.floor(LINES/2)];
+  const failures=results.filter(v=>v>=maxDepth-2).length;
+  return {width:med, confidence:failures<=2?'good':failures<=5?'low':'failed', rawValues:results};
 }
 
 // ─── STEP 6: Full centering calculation ─────────────────────────────────────
 function detectCentering(d, w, h, bn) {
-  // No longer need to sample edge color — gradient approach is color-agnostic
-  const sL=scanBorderWidth(d,w,h,bn,'L');
-  const sR=scanBorderWidth(d,w,h,bn,'R');
-  const sT=scanBorderWidth(d,w,h,bn,'T');
-  const sB=scanBorderWidth(d,w,h,bn,'B');
+  const cL=sampleEdgeColor(d,w,h,bn,'L'), cR=sampleEdgeColor(d,w,h,bn,'R');
+  const cT=sampleEdgeColor(d,w,h,bn,'T'), cB=sampleEdgeColor(d,w,h,bn,'B');
+  const sL=scanBorderWidth(d,w,h,bn,'L',cL), sR=scanBorderWidth(d,w,h,bn,'R',cR);
+  const sT=scanBorderWidth(d,w,h,bn,'T',cT), sB=scanBorderWidth(d,w,h,bn,'B',cB);
   const bL=sL.width,bR=sR.width,bT=sT.width,bB=sB.width;
   const lrT=bL+bR, tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
   const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
   const confs=[sL.confidence,sR.confidence,sT.confidence,sB.confidence];
   const conf=confs.every(c=>c==='good')?'good':confs.filter(c=>c==='failed').length>=2?'failed':'low';
-  return {bL,bR,bT,bB,lrRatio,tbRatio,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf};
+  return {bL,bR,bT,bB,lrRatio,tbRatio,colorL:cL,colorR:cR,colorT:cT,colorB:cB,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf};
 }
 
 // ─── Full pipeline ────────────────────────────────────────────────────────────
@@ -358,8 +449,16 @@ function drawOverlay(canvas, result, debug) {
   }
 
   if(debug){
-    // Scan line probe positions
-    const LINES=11;
+    // Color swatches
+    const sw=16;
+    [['L',c.colorL,cl+4,ct+4],['R',c.colorR,cl+28,ct+4],
+     ['T',c.colorT,cl+52,ct+4],['B',c.colorB,cl+76,ct+4]].forEach(([l,col,x,y])=>{
+      ctx.fillStyle=`rgb(${~~col.r},${~~col.g},${~~col.b})`;ctx.fillRect(x,y,sw,sw);
+      ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.strokeRect(x,y,sw,sw);
+      ctx.fillStyle='#fff';ctx.font=`8px ${mono}`;ctx.textAlign='left';ctx.fillText(l,x+1,y+sw-2);
+    });
+    // Scan line dots
+    const LINES=9;
     ['L','R','T','B'].forEach(edge=>{
       for(let li=0;li<LINES;li++){
         const frac=0.15+0.70*(li/(LINES-1));
@@ -370,14 +469,6 @@ function drawOverlay(canvas, result, debug) {
         if(edge==='B'){px=Math.round(cl+cW*frac);py=cb;}
         ctx.fillStyle='rgba(0,200,255,.8)';ctx.beginPath();ctx.arc(px,py,3,0,Math.PI*2);ctx.fill();
       }
-    });
-    // Show peak gradient values per edge
-    ctx.font=`10px ${mono}`; ctx.textAlign='left';
-    const edges=[['L',c.scanL,cl+4,ct+20],['R',c.scanR,cl+4,ct+36],['T',c.scanT,cl+4,ct+52],['B',c.scanB,cl+4,ct+68]];
-    edges.forEach(([lbl,scan,x,y])=>{
-      ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(x,y-12,90,16);
-      ctx.fillStyle=scan.confidence==='good'?'#00ff88':scan.confidence==='low'?'#ccbb00':'#ff4444';
-      ctx.fillText(`${lbl}: g${scan.peakGrad} @${scan.width}px`,x+3,y);
     });
   }
 }
@@ -474,10 +565,11 @@ function CardPanel({label,side,onResult}){
           ))}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:6}}>
-          <span style={{fontFamily:mono,fontSize:8,color:'#444'}}>PEAK GRAD:</span>
-          {[['L',c.scanL],['R',c.scanR],['T',c.scanT],['B',c.scanB]].map(([lbl,scan])=>(
+          <span style={{fontFamily:mono,fontSize:8,color:'#444'}}>SAMPLED:</span>
+          {[['L',c.colorL],['R',c.colorR],['T',c.colorT],['B',c.colorB]].map(([lbl,col])=>(
             <div key={lbl} style={{display:'flex',alignItems:'center',gap:3}}>
-              <span style={{fontFamily:mono,fontSize:9,color:scan.confidence==='good'?'#00ff88':scan.confidence==='low'?'#ccbb00':'#ff4444'}}>{lbl}:{scan.peakGrad}</span>
+              <div style={{width:12,height:12,borderRadius:2,background:`rgb(${~~col.r},${~~col.g},${~~col.b})`,border:'1px solid #333'}}/>
+              <span style={{fontFamily:mono,fontSize:7,color:'#444'}}>{lbl}</span>
             </div>
           ))}
         </div>
