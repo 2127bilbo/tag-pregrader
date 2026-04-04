@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.centeringcheck.com)",
+      "WebSearch",
+      "WebFetch(domain:www.centergrade.com)"
+    ]
+  }
+}
