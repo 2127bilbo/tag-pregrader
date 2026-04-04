@@ -199,32 +199,43 @@ function scanBorderFromEdge(d, w, h, dir, edgeCoord, along0, along1) {
    ═══════════════════════════════════════════ */
 function analyzeCentering(d,w,h,bn){
   const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
-  // Try multiple variance thresholds and pick the most symmetric result
-  const thresholds = [100, 150, 200, 300, 500];
-  let bestResult = null, bestSymmetry = Infinity;
+  const thresholds = [50, 100, 150, 200, 300, 500];
+  const validResults = [];
   
   for (const vT of thresholds) {
     let bL=0,bR=0,bT=0,bB=0;
     const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,x,Math.min(h-1,y)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
     const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,Math.min(w-1,x),y));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
     
-    for(let x=cl+~~(cW*.03);x<cl+~~(cW*.25);x++) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bL=x-cl;break;}
-    for(let x=cr-~~(cW*.03);x>cr-~~(cW*.25);x--) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bR=cr-x;break;}
-    for(let y=ct+~~(cH*.03);y<ct+~~(cH*.25);y++) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bT=y-ct;break;}
-    for(let y=cb-~~(cH*.03);y>cb-~~(cH*.25);y--) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bB=cb-y;break;}
+    // Start at 1% not 3% — thin modern card borders can be missed if we skip too far in
+    for(let x=cl+~~(cW*.01);x<cl+~~(cW*.25);x++) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bL=x-cl;break;}
+    for(let x=cr-~~(cW*.01);x>cr-~~(cW*.25);x--) if(colVar(x,ct+~~(cH*.1),ct+~~(cH*.9))>vT){bR=cr-x;break;}
+    for(let y=ct+~~(cH*.01);y<ct+~~(cH*.25);y++) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bT=y-ct;break;}
+    for(let y=cb-~~(cH*.01);y>cb-~~(cH*.25);y--) if(rowVar(y,cl+~~(cW*.1),cl+~~(cW*.9))>vT){bB=cb-y;break;}
     
     if (bL > 0 && bR > 0 && bT > 0 && bB > 0) {
-      // Prefer results where borders are reasonable (5-20% of card dimension)
       const lrTotal = bL+bR, tbTotal = bT+bB;
       const lrPct = lrTotal/cW, tbPct = tbTotal/cH;
-      if (lrPct > 0.03 && lrPct < 0.35 && tbPct > 0.03 && tbPct < 0.35) {
-        const symmetry = Math.abs(bL-bR)/Math.max(1,lrTotal) + Math.abs(bT-bB)/Math.max(1,tbTotal);
-        if (symmetry < bestSymmetry || !bestResult) {
-          bestSymmetry = symmetry;
-          bestResult = { borderL:bL, borderR:bR, borderT:bT, borderB:bB };
-        }
+      // Lowered min from 3% to 1% — thin borders on modern cards can be < 3% total
+      if (lrPct > 0.01 && lrPct < 0.35 && tbPct > 0.01 && tbPct < 0.35) {
+        validResults.push({ borderL:bL, borderR:bR, borderT:bT, borderB:bB });
       }
     }
+  }
+  
+  // Median of all valid threshold results.
+  // The old "most symmetric" selector was backwards — it preferred readings where
+  // bL≈bR, actively biasing toward 50/50 even when the card IS off-center.
+  // Median is neutral: it picks the middle detected position across thresholds.
+  let bestResult = null;
+  if (validResults.length > 0) {
+    const med = arr => { const s=[...arr].sort((a,b)=>a-b); const m=~~(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; };
+    bestResult = {
+      borderL: med(validResults.map(r=>r.borderL)),
+      borderR: med(validResults.map(r=>r.borderR)),
+      borderT: med(validResults.map(r=>r.borderT)),
+      borderB: med(validResults.map(r=>r.borderB)),
+    };
   }
   
   // Mode 2: Mode 1 found nothing (full-art/holo card with no artwork border to detect).
