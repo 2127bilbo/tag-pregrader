@@ -1703,7 +1703,7 @@ export default function TAGPreGrader(){
     <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1c22",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:"#0a0b0e"}}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <div style={{width:30,height:30,borderRadius:7,background:"linear-gradient(135deg,#00ff88,#0088ff)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:mono,fontWeight:900,fontSize:13,color:"#000"}}>TG</div>
-        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.6 — DINGS-Based Engine</div></div>
+        <div><div style={{fontSize:14,fontWeight:600}}>TAG Pre-Grader</div><div style={{fontFamily:mono,fontSize:9,color:"#444",textTransform:"uppercase",letterSpacing:".1em"}}>v2.7 — DINGS-Based Engine</div></div>
       </div>
       {step===2&&<button onClick={reset} style={{background:"transparent",border:"1px solid #2a2d35",borderRadius:6,color:"#666",fontFamily:mono,fontSize:10,padding:"5px 10px",cursor:"pointer",textTransform:"uppercase"}}>New</button>}
     </div>
@@ -1716,7 +1716,7 @@ export default function TAGPreGrader(){
       </div>
       <button onClick={run} disabled={!fI||!bI} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:fI&&bI?"linear-gradient(135deg,#00ff88,#0088ff)":"#1a1c22",color:fI&&bI?"#000":"#444",fontFamily:mono,fontSize:13,fontWeight:700,cursor:fI&&bI?"pointer":"default",textTransform:"uppercase",letterSpacing:".08em",transition:"all .3s"}}>{fI&&bI?"▶  Analyze Card":"Capture both sides"}</button>
       <div style={{marginTop:16,padding:14,background:"#0d0f13",borderRadius:8,border:"1px solid #1a1c22"}}>
-        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.6 — DINGS-Based Scoring</div>
+        <div style={{fontFamily:mono,fontSize:10,color:"#00ff88",textTransform:"uppercase",marginBottom:6}}>v2.7 — DINGS-Based Scoring</div>
         <div style={{fontSize:12,color:"#666",lineHeight:1.7}}>
           Scoring engine rebuilt around <span style={{color:"#ff9944"}}>DINGS detection</span> — the same defect classification system TAG uses.
           Calibrated against 6 real TAG DIG reports spanning grades 5 through Gem Mint 10.
