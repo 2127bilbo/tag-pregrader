@@ -334,7 +334,7 @@ function refineBoundsByGradient(d,w,h,bn){
   return null;
 }
 
-STEP 4: Sample border color from card edge ──────────────────────────────
+// STEP 4: Sample border color from card edge ──────────────────────────────
 // Sample the outermost pixels of the detected card on each side.
 // This is the "ground truth" border color under current lighting conditions —
 // works on blue card backs, white/silver fronts, dark WOTC borders, all of them.
