@@ -39,66 +39,70 @@ const LUM   = (r,g,b)   => .299*r + .587*g + .114*b;
 const CLAMP = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
 
 // ─── STEP 1: Card boundary detection ─────────────────────────────────────────
-// Strategy: sample background color from image corners, then scan inward from
-// each image edge until pixels stop matching background = card edge found.
-// This works on white, black, gray, any solid background. Doesn't get confused
-// by deskew rotation artifacts (dark triangles in corners) because we're looking
-// for where the CARD starts, not where high-variance regions are.
+// Background-color approach: sample corners for paper/background color,
+// sample image center for card color, set adaptive threshold between them.
+// Adaptive threshold handles gray paper + silver card (low contrast) just as
+// well as white paper + dark card (high contrast).
 function findBounds(d, w, h) {
-  // Sample background from 4 image corners, 10x10 patch each
-  const PATCH=10;
+  const PATCH=12;
+
+  // Sample background from 4 image corners
   let bgR=0,bgG=0,bgB=0,bgN=0;
-  const corners=[[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]];
-  for(const [cx,cy] of corners){
+  for(const [cx,cy] of [[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]]){
     for(let dy=0;dy<PATCH;dy++) for(let dx=0;dx<PATCH;dx++){
       const [r,g,b]=PX(d,w,CLAMP(cx+dx,0,w-1),CLAMP(cy+dy,0,h-1));
       bgR+=r;bgG+=g;bgB+=b;bgN++;
     }
   }
-  bgR/=bgN; bgG/=bgN; bgB/=bgN;
+  bgR/=bgN;bgG/=bgN;bgB/=bgN;
+
+  // Sample card color from image center
+  let cR=0,cG=0,cB=0,cN=0;
+  const CX=Math.round(w/2),CY=Math.round(h/2);
+  for(let dy=-PATCH;dy<=PATCH;dy++) for(let dx=-PATCH;dx<=PATCH;dx++){
+    const [r,g,b]=PX(d,w,CLAMP(CX+dx,0,w-1),CLAMP(CY+dy,0,h-1));
+    cR+=r;cG+=g;cB+=b;cN++;
+  }
+  cR/=cN;cG/=cN;cB/=cN;
+
   const bgDist=(r,g,b)=>Math.sqrt((r-bgR)**2+(g-bgG)**2+(b-bgB)**2);
+  const centerDist=bgDist(cR,cG,cB);
 
-  // Tolerance: how different a pixel must be from background to be "card"
-  // 35 handles white paper vs white card border (subtle), 
-  // but also works for dark backgrounds vs dark cards
-  const TOL=35;
+  // Adaptive threshold: 35% of the background-to-card color distance.
+  // Low contrast (gray paper + silver card): centerDist ~30 → TOL ~11
+  // High contrast (white paper + dark card): centerDist ~200 → TOL ~70
+  // Floor of 12 prevents triggering on camera noise in uniform backgrounds.
+  const TOL=Math.max(12, centerDist*0.35);
 
-  // For each scan position, average across N samples perpendicular to scan direction
-  // to avoid being fooled by a single dark pixel or dust
-  const N=20;
+  // Scan inward from each image edge — average N samples across middle 50%
+  const N=24;
   const scanAvg=(dir,pos)=>{
     let dist=0;
     for(let i=0;i<N;i++){
-      const f=0.25+0.5*i/(N-1); // sample middle 50% to avoid corner artifacts
+      const f=0.25+0.5*i/(N-1);
       let px,py;
-      if(dir==='L'){px=pos;py=Math.round(h*f);}
-      if(dir==='R'){px=pos;py=Math.round(h*f);}
-      if(dir==='T'){px=Math.round(w*f);py=pos;}
-      if(dir==='B'){px=Math.round(w*f);py=pos;}
-      px=CLAMP(px,0,w-1);py=CLAMP(py,0,h-1);
-      const [r,g,b]=PX(d,w,px,py);
+      if(dir==='L'||dir==='R'){px=pos;py=Math.round(h*f);}
+      else{px=Math.round(w*f);py=pos;}
+      const [r,g,b]=PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1));
       dist+=bgDist(r,g,b);
     }
     return dist/N;
   };
 
-  // Scan inward from each image edge — first position where avg dist > TOL = card edge
   let left=0,right=w-1,top=0,bottom=h-1;
-  const maxScan=Math.min(w,h)*0.45; // don't scan more than 45% in
-  for(let x=0;x<maxScan;x++)  if(scanAvg('L',x)>TOL){left=x;break;}
+  const maxScan=Math.min(w,h)*0.45;
+  for(let x=0;x<maxScan;x++)    if(scanAvg('L',x)>TOL){left=x;break;}
   for(let x=w-1;x>w-maxScan;x--) if(scanAvg('R',x)>TOL){right=x;break;}
-  for(let y=0;y<maxScan;y++)  if(scanAvg('T',y)>TOL){top=y;break;}
+  for(let y=0;y<maxScan;y++)    if(scanAvg('T',y)>TOL){top=y;break;}
   for(let y=h-1;y>h-maxScan;y--) if(scanAvg('B',y)>TOL){bottom=y;break;}
 
-  const cardW=right-left, cardH=bottom-top;
-
-  // Sanity check: result must be card-shaped (ratio 0.55–0.85) and reasonably sized
+  const cardW=right-left,cardH=bottom-top;
   const ratio=cardW/cardH;
-  if(cardW>w*0.10 && cardH>h*0.10 && ratio>0.55 && ratio<0.85){
+
+  // Valid Pokemon card: aspect ratio 0.55–0.85, at least 15% of image each dim
+  if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
     return {left,right,top,bottom,cardW,cardH};
   }
-
-  // Fallback: variance-based grid method (works well when no clear background)
   return varianceFallback(d,w,h);
 }
 
@@ -233,7 +237,10 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
   for(let li=0;li<LINES;li++){
     const frac=0.15+0.70*(li/(LINES-1));
     let hit=maxDepth;
-    for(let dep=3;dep<maxDepth;dep++){
+    // Start at dep=1 (not dep=3) to catch thin 1-2px borders
+    // TOL=55: high enough to ignore within-border color variation,
+    //         low enough to catch the real border-to-artwork transition
+    for(let dep=1;dep<maxDepth;dep++){
       let dSum=0;
       for(let pi=0;pi<PTS;pi++){
         const sp=0.25+0.50*(pi/(PTS-1));
@@ -245,7 +252,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
         px=CLAMP(px,0,w-1); py=CLAMP(py,0,h-1);
         const [r,g,b]=PX(d,w,px,py); dSum+=colorDist(r,g,b);
       }
-      if(dSum/PTS>TOL){hit=dep;break;}
+      if(dSum/PTS>55){hit=dep;break;}
     }
     results.push(hit);
   }
