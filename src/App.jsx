@@ -1,9 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 /* ═══════════════════════════════════════════
-   TAG PRE-GRADER v2.6
+   TAG PRE-GRADER v2.7
    DINGS-Based Scoring Engine + Manual Boundary Editor
    Calibrated against 6 real TAG DIG reports
+   v2.7: Fix 1 — Corner false positives on foil/holo (luminance variance guard)
+         Fix 2 — Centering: Mode 2 edge-band scan for full-art/foil cards
+         Fix 3 — All-metallic surface detection (Ancient Mew false DING)
    ═══════════════════════════════════════════ */
 
 const GRADES = [
@@ -157,6 +160,41 @@ function edgeScanFallback(d, w, h) {
 }
 
 /* ═══════════════════════════════════════════
+   CENTERING — MODE 2 HELPER
+   Scans inward from physical card edge looking
+   for where color diverges from edge strip.
+   Used when Mode 1 (variance spike) fails on
+   full-art/holo cards with no visible border.
+   ═══════════════════════════════════════════ */
+function scanBorderFromEdge(d, w, h, dir, edgeCoord, along0, along1) {
+  const sampleN = 20;
+  const maxScan = Math.round(Math.abs(along1-along0) * 0.18);
+  
+  const sample = (depth) => {
+    let s = 0;
+    for(let i=0; i<sampleN; i++){
+      const f = along0 + (along1-along0)*(i+0.5)/sampleN;
+      let px, py;
+      if(dir==='L')      { px=edgeCoord+depth; py=Math.round(f); }
+      else if(dir==='R') { px=edgeCoord-depth; py=Math.round(f); }
+      else if(dir==='T') { px=Math.round(f);   py=edgeCoord+depth; }
+      else               { px=Math.round(f);   py=edgeCoord-depth; }
+      s += LUM(...PX(d,w,Math.max(0,Math.min(w-1,px)),Math.max(0,Math.min(h-1,py))));
+    }
+    return s/sampleN;
+  };
+  
+  // Average the outermost 3 pixel rows for a stable edge-color baseline
+  const edgeLum = (sample(0)+sample(1)+sample(2))/3;
+  // Scan inward — first depth where luminance diverges meaningfully = border edge
+  const tolerance = 20;
+  for(let dep=3; dep<maxScan; dep++){
+    if(Math.abs(sample(dep)-edgeLum) > tolerance) return dep;
+  }
+  return 0; // no clear border found — truly edge-to-edge artwork
+}
+
+/* ═══════════════════════════════════════════
    CENTERING ANALYSIS (improved)
    ═══════════════════════════════════════════ */
 function analyzeCentering(d,w,h,bn){
@@ -186,6 +224,22 @@ function analyzeCentering(d,w,h,bn){
           bestResult = { borderL:bL, borderR:bR, borderT:bT, borderB:bB };
         }
       }
+    }
+  }
+  
+  // Mode 2: Mode 1 found nothing (full-art/holo card with no artwork border to detect).
+  // Scan inward from each physical card edge — many foil cards have a thin uniform-color
+  // border strip (the holo foil margin) that diverges from the inner artwork color.
+  if(!bestResult) {
+    const bL = scanBorderFromEdge(d,w,h,'L',cl,ct+~~(cH*.1),cb-~~(cH*.1));
+    const bR = scanBorderFromEdge(d,w,h,'R',cr,ct+~~(cH*.1),cb-~~(cH*.1));
+    const bT = scanBorderFromEdge(d,w,h,'T',ct,cl+~~(cW*.1),cr-~~(cW*.1));
+    const bB = scanBorderFromEdge(d,w,h,'B',cb,cl+~~(cW*.1),cr-~~(cW*.1));
+    const lrTot=bL+bR, tbTot=bT+bB;
+    const lrPct=lrTot/cW, tbPct=tbTot/cH;
+    // Only accept if all four borders are found and within plausible range (1–18% of dim)
+    if(bL>0&&bR>0&&bT>0&&bB>0 && lrPct>0.01&&lrPct<0.18 && tbPct>0.01&&tbPct<0.18){
+      bestResult = { borderL:bL, borderR:bR, borderT:bT, borderB:bB };
     }
   }
   
@@ -252,12 +306,25 @@ function detectCornerDings(d, w, h, bn, side) {
   const borderLum = LUM(borderR,borderG,borderB);
   const isDarkBorder = borderLum < 80; // WOTC-era cards have dark blue/black borders
 
+  // Holo/foil detection: sample global card variance (same method as surface detection).
+  // Foil cards produce false corner DINGS — their reflective border creates uniformly bright,
+  // color-neutral pixels indistinguishable from corner whitening. gVar > 800 = foil/holo.
+  let gS=0,gSq=0,gN=0;
+  const gStep=Math.max(4,~~(Math.min(cW,cH)/40));
+  for(let gy=ct+~~(cH*0.1);gy<cb-~~(cH*0.1);gy+=gStep)
+    for(let gx=cl+~~(cW*0.1);gx<cr-~~(cW*0.1);gx+=gStep)
+      {const l=LUM(...PX(d,w,Math.min(w-1,gx),Math.min(h-1,gy)));gS+=l;gSq+=l*l;gN++;}
+  const cardGVar=gN>0?gSq/gN-(gS/gN)**2:0;
+  const isHolo = cardGVar > 800;
+
   for (const { name, x:cx, y:cy } of corners) {
     let whitePixels=0, colorDevPixels=0, totalPixels=0, sharpness=0, gradCount=0;
+    let lSum=0, lSq=0, lN=0; // for luminance variance (foil uniform-glow check)
     
     for (let dy=0; dy<cs; dy++) for (let dx=0; dx<cs; dx++) {
       const X=Math.min(w-1,Math.max(0,cx+dx)), Y=Math.min(h-1,Math.max(0,cy+dy));
       const [r,g,b]=PX(d,w,X,Y); const l=LUM(r,g,b); totalPixels++;
+      lSum+=l; lSq+=l*l; lN++;
       if(l>215 && Math.abs(r-g)<25 && Math.abs(g-b)<25) whitePixels++;
       // For dark-bordered cards: also detect significant color deviation from expected border
       if(isDarkBorder){
@@ -278,6 +345,16 @@ function detectCornerDings(d, w, h, bn, side) {
     // Combined wear signal: white pixels OR color deviation on dark-border cards
     const effectiveWearRatio = isDarkBorder ? Math.max(whiteRatio, colorDevRatio*0.7) : whiteRatio;
     
+    // Foil false-positive guard:
+    //   Foil reflection = high mean luminance + LOW variance (uniform, even glow)
+    //   Real corner wear = high mean luminance + HIGH variance (patchy, uneven whitening)
+    // Proof: TAG-verified 10 Mew EX shows identical F:980/Fi:975 on all 8 corners — that's
+    // the foil glow, not wear. Real wear would never be perfectly symmetrical across all corners.
+    const lumVariance = lN>0 ? lSq/lN-(lSum/lN)**2 : 0;
+    const isUniformBright = (lN>0 && lSum/lN > 180) && lumVariance < 200;
+    // Holo cards also get raised raw thresholds even for non-uniform regions (foil ≠ white paper)
+    const holoMultiplier = isHolo ? 2.0 : 1.0;
+    
     // Fray/Fill/Angle scoring (TAG-style supplementary metrics)
     let fray = 1000, fill = 1000, angle = 1000;
     if (effectiveWearRatio > 0.30) { fray -= 20; fill -= 25; }
@@ -289,8 +366,10 @@ function detectCornerDings(d, w, h, bn, side) {
     
     const sideLabel = side === "front" ? "FRONT" : "BACK";
     
-    // DING threshold — visible wear that impacts grade
-    const hasWear = effectiveWearRatio > 0.10 || avgSharp < 4;
+    // DING threshold: uniform bright glow = foil reflection, not wear → skip.
+    // Holo cards: double the wear ratio threshold (foil material ≠ worn paper).
+    const hasWear = !isUniformBright && 
+      (effectiveWearRatio > 0.10 * holoMultiplier || avgSharp < 4 / holoMultiplier);
     if (hasWear) {
       dings.push({
         side: sideLabel,
@@ -419,12 +498,23 @@ function detectSurfaceDings(d, w, h, bn, side) {
   // High-design card back: high global variance but not a holo front
   const isHighDesignBack = isBack && gVar > 400;
   
+  // All-metallic / fully-embossed detection (e.g. Ancient Mew):
+  // If >70% of surface cells have high variance, the entire card is metallic by design.
+  // Ancient Mew's 17.8% front anomaly rate crossed the normal holo DING threshold (14%)
+  // but TAG says the card is fine — the entire surface IS the design, not damage.
+  let highVarCellCount=0, allCellCount=0;
+  for(let gy=0;gy<gY;gy++) for(let gx=0;gx<gX;gx++){
+    allCellCount++;
+    if(cells[gy]&&cells[gy][gx]&&cells[gy][gx].variance>300) highVarCellCount++;
+  }
+  const isAllMetallic = isHolo && !isBack && (allCellCount>0) && (highVarCellCount/allCellCount)>0.70;
+  
   // Set thresholds — high-design backs get much higher thresholds since pokeball/logo
   // create massive cell variance that has nothing to do with surface wear
   const baseHigh = isHolo ? 35 : 25;
   const baseLow  = isHolo ? 22 : 15;
-  const diffThreshHigh = isHighDesignBack ? 55 : baseHigh;
-  const diffThreshLow  = isHighDesignBack ? 38 : baseLow;
+  const diffThreshHigh = isHighDesignBack ? 55 : isAllMetallic ? 48 : baseHigh;
+  const diffThreshLow  = isHighDesignBack ? 38 : isAllMetallic ? 32 : baseLow;
   const varMultiplier  = isHolo ? 3.5 : isHighDesignBack ? 4.5 : 2.8;
   const varFloor       = isHolo ? 400 : isHighDesignBack ? 600 : 250;
   
@@ -445,7 +535,17 @@ function detectSurfaceDings(d, w, h, bn, side) {
   
   // Classify as DINGS — card backs with high-design artwork get very high thresholds
   // Holo fronts get elevated thresholds. Standard fronts get base thresholds.
-  if (isHighDesignBack) {
+  if (isAllMetallic) {
+    // Ancient Mew / all-metallic embossed: entire surface has high variance by design.
+    // Thresholds raised substantially — only flag actual damage, not metallic shimmer.
+    if (anomRate > 0.40 || scratchRate > 0.32) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
+    } else if (anomRate > 0.28 || scratchRate > 0.22) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:2, desc:"Surface wear visible" });
+    } else if (anomRate > 0.20 || scratchRate > 0.14) {
+      dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:1, desc:"Minor surface imperfection" });
+    }
+  } else if (isHighDesignBack) {
     // Card back: pokeball/logo design creates massive false variance. Only flag obvious damage.
     if (anomRate > 0.45 || scratchRate > 0.35) {
       dings.push({ side:sideLabel, type:"SURFACE / PLAY WEAR", location:sideLabel, severity:3, desc:"Surface play wear / multiple defects" });
