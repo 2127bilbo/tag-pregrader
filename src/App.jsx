@@ -274,7 +274,67 @@ function deskewCanvas(srcCanvas, angle) {
   return c;
 }
 
-// ─── STEP 4: Sample border color from card edge ──────────────────────────────
+// ─── 
+function refineBoundsByGradient(d,w,h,bn){
+  const maxScan=Math.min(w,h)*0.45;
+  const N=28;
+  const gradAt=(dir,pos)=>{
+    let g=0;
+    for(let i=0;i<N;i++){
+      const f=0.25+0.5*i/(N-1);
+      let x,y;
+      if(dir==='L'||dir==='R'){x=pos; y=Math.round(h*f);} else {x=Math.round(w*f); y=pos;}
+      const xm=CLAMP(x-1,0,w-1), xp=CLAMP(x+1,0,w-1);
+      const ym=CLAMP(y-1,0,h-1), yp=CLAMP(y+1,0,h-1);
+      const gx=LUM(...PX(d,w,xp,y))-LUM(...PX(d,w,xm,y));
+      const gy=LUM(...PX(d,w,x,yp))-LUM(...PX(d,w,x,ym));
+      g+=Math.abs(gx)+Math.abs(gy);
+    }
+    return g/N;
+  };
+  const isSuspicious = bn.left<2||bn.top<2||bn.right>w-3||bn.bottom>h-3||bn.cardW>w*0.95||bn.cardH>h*0.95;
+  const margin = Math.round(Math.min(bn.cardW,bn.cardH)*0.08);
+
+  const findPeak=(dir,from,to,baseFrom,baseTo)=>{
+    let bestPos=null,bestG=0;
+    const base=[];
+    for(let p=baseFrom;p<=baseTo;p++) base.push(gradAt(dir,p));
+    const m=MED(base);
+    const mean=base.reduce((s,v)=>s+v,0)/base.length;
+    const std=Math.sqrt(base.reduce((s,v)=>s+(v-mean)**2,0)/base.length);
+    const thresh=Math.max(1.2, m + std*3.0);
+    for(let p=from;p<=to;p++){
+      const g=gradAt(dir,p);
+      if(g>bestG){bestG=g;bestPos=p;}
+    }
+    return bestG>thresh?{pos:bestPos,g:bestG,thresh}:null;
+  };
+
+  const Lfrom = isSuspicious? 2 : Math.max(2, bn.left - margin);
+  const Lto   = isSuspicious? Math.round(maxScan) : Math.min(Math.round(maxScan), bn.left + margin);
+  const Rfrom = isSuspicious? w-1-Math.round(maxScan) : Math.max(w-1-Math.round(maxScan), bn.right - margin);
+  const Rto   = isSuspicious? w-3 : Math.min(w-3, bn.right + margin);
+  const Tfrom = isSuspicious? 2 : Math.max(2, bn.top - margin);
+  const Tto   = isSuspicious? Math.round(maxScan) : Math.min(Math.round(maxScan), bn.top + margin);
+  const Bfrom = isSuspicious? h-1-Math.round(maxScan) : Math.max(h-1-Math.round(maxScan), bn.bottom - margin);
+  const Bto   = isSuspicious? h-3 : Math.min(h-3, bn.bottom + margin);
+
+  const L= findPeak('L', Lfrom, Lto, 0, Math.min(8,Lfrom));
+  const R= findPeak('R', Rfrom, Rto, Math.max(w-9,Rfrom), w-1);
+  const T= findPeak('T', Tfrom, Tto, 0, Math.min(8,Tfrom));
+  const B= findPeak('B', Bfrom, Bto, Math.max(h-9,Bfrom), h-1);
+
+  if(!(L&&R&&T&&B)) return null;
+  const left=L.pos, right=R.pos, top=T.pos, bottom=B.pos;
+  const cardW=right-left, cardH=bottom-top;
+  const ratio=cardW/cardH;
+  if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
+    return {left,right,top,bottom,cardW,cardH,method:'ref'};
+  }
+  return null;
+}
+
+STEP 4: Sample border color from card edge ──────────────────────────────
 // Sample the outermost pixels of the detected card on each side.
 // This is the "ground truth" border color under current lighting conditions —
 // works on blue card backs, white/silver fronts, dark WOTC borders, all of them.
@@ -414,11 +474,13 @@ async function analyzeCard(src) {
   const dd=dc.getImageData(0,0,deskewed.width,deskewed.height);
   const dw=deskewed.width,dh=deskewed.height;
   const bounds=findBounds(dd.data,dw,dh);
+  const refined=refineBoundsByGradient(dd.data,dw,dh,bounds);
+  const finalBounds=refined||bounds;
   // Stages 5+6: centering on clean deskewed card
   const blurred=blurImageData(dd.data,dw,dh,1);
-  const centering=detectCentering(dd.data,dw,dh,bounds,blurred);
+  const centering=detectCentering(dd.data,dw,dh,finalBounds,blurred);
   const displayUrl=deskewed.toDataURL('image/jpeg',0.92);
-  return {displayUrl,dw,dh,bounds,centering,angle,angleResult,deskewApplied};
+  return {displayUrl,dw,dh,bounds:finalBounds,centering,angle,angleResult,deskewApplied};
 }
 
 // ─── Overlay ─────────────────────────────────────────────────────────────────
