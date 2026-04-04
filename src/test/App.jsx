@@ -314,6 +314,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
   const distThresh=Math.max(12, (borderColor.std||0)*2.2);
 
   const results=[];
+  const gMedArr=[], gThreshArr=[], bestGArr=[], bestDepArr=[];
   for(let li=0;li<LINES;li++){
     const frac=0.15+0.70*(li/(LINES-1));
     let hit=maxDepth;
@@ -355,12 +356,20 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
       }
       if(bestG>gThresh*1.1) hit=bestDep;
     }
+    gMedArr.push(gMed); gThreshArr.push(gThresh); bestGArr.push(bestG); bestDepArr.push(bestDep);
     results.push(hit);
   }
   results.sort((a,b)=>a-b);
   const med=results[Math.floor(LINES/2)];
   const failures=results.filter(v=>v>=maxDepth-2).length;
-  return {width:med, confidence:failures<=2?'good':failures<=5?'low':'failed', rawValues:results, debug:{gMed,gThresh,distThresh,bestG,bestDep}};
+  const dbg={
+    gMed: MED(gMedArr),
+    gThresh: MED(gThreshArr),
+    distThresh,
+    bestG: MED(bestGArr),
+    bestDep: Math.round(MED(bestDepArr))
+  };
+  return {width:med, confidence:failures<=2?'good':failures<=5?'low':'failed', rawValues:results, debug:dbg};
 }
 
 // ─── STEP 6: Full centering calculation ─────────────────────────────────────
