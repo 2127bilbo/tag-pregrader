@@ -499,9 +499,16 @@ function CardPanel({label,side,onResult}){
     reader.onload=async ev=>{
       const src=ev.target.result;
       setImgSrc(src);setResult(null);setLoading(true);
-      const res=await analyzeCard(src);
-      setResult(res);setLoading(false);
-      if(onResult)onResult(res);
+      try{
+        const res=await analyzeCard(src);
+        setResult(res);
+        if(onResult)onResult(res);
+      }catch(err){
+        console.error('analyzeCard failed', err);
+        setResult(null);
+      }finally{
+        setLoading(false);
+      }
     };
     reader.readAsDataURL(f);
   };
