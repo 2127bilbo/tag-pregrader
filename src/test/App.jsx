@@ -122,13 +122,16 @@ function findBounds(d, w, h) {
 
   const cardW=right-left,cardH=bottom-top;
   const ratio=cardW/cardH;
+  const ok=cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85;
+  const suspicious = left<2||top<2||right>w-3||bottom>h-3||cardW>w*0.95||cardH>h*0.95;
 
-  // Valid Pokemon card: aspect ratio 0.55–0.85, at least 15% of image each dim
-  if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
+  // Valid Pokemon card: aspect ratio 0.55???0.85, at least 15% of image each dim
+  if(ok && !suspicious){
     return {left,right,top,bottom,cardW,cardH,method:'bg'};
   }
   const gBounds=gradientFallback(d,w,h);
   if(gBounds) return gBounds;
+  if(ok) return {left,right,top,bottom,cardW,cardH,method:'bg'};
   return varianceFallback(d,w,h);
 }
 
@@ -278,15 +281,16 @@ function deskewCanvas(srcCanvas, angle) {
 function sampleEdgeColor(d, w, h, bn, edge) {
   const {left:cl,right:cr,top:ct,cardW:cW,cardH:cH}=bn; const cb=ct+cH;
   const STRIP=5, N=28;
+  const INSET=Math.max(2, Math.round(Math.min(cW,cH)*0.004));
   const rs=[],gs=[],bs=[];
   for(let i=0;i<N;i++){
     const f=0.30+0.40*i/(N-1); // center 40% of each edge — avoids corners
     for(let s=0;s<STRIP;s++){
       let px,py;
-      if(edge==='L'){px=cl+s;                py=Math.round(ct+cH*f);}
-      if(edge==='R'){px=CLAMP(cr-s,0,w-1);   py=Math.round(ct+cH*f);}
-      if(edge==='T'){px=Math.round(cl+cW*f); py=ct+s;}
-      if(edge==='B'){px=Math.round(cl+cW*f); py=CLAMP(cb-s,0,h-1);}
+      if(edge==='L'){px=cl+INSET+s;             py=Math.round(ct+cH*f);}
+      if(edge==='R'){px=CLAMP(cr-INSET-s,0,w-1);py=Math.round(ct+cH*f);}
+      if(edge==='T'){px=Math.round(cl+cW*f);    py=ct+INSET+s;}
+      if(edge==='B'){px=Math.round(cl+cW*f);    py=CLAMP(cb-INSET-s,0,h-1);}
       px=CLAMP(px,0,w-1); py=CLAMP(py,0,h-1);
       const [r,g,b]=PX(d,w,px,py);
       rs.push(r); gs.push(g); bs.push(b);
@@ -311,7 +315,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
   const LINES=9, PTS=11;
   const {r:br,g:bg,b:bb}=borderColor;
   const colorDist=(r,g,b)=>Math.sqrt((r-br)**2+(g-bg)**2+(b-bb)**2);
-  const distThresh=Math.max(12, (borderColor.std||0)*2.2);
+  const distThresh=Math.min(80, Math.max(8, (borderColor.std||0)*1.6));
 
   const results=[];
   const gMedArr=[], gThreshArr=[], bestGArr=[], bestDepArr=[];
@@ -344,7 +348,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
       gArr[dep]=gSum/PTS;
     }
     const gMed=MED(gArr.filter(v=>typeof v==='number'));
-    const gThresh=Math.max(6, gMed*2.2);
+    const gThresh=Math.max(1.5, gMed*2.0);
     const minDepth=2;
     for(let dep=minDepth;dep<maxDepth-1;dep++){
       if(gArr[dep]>gThresh && dArr[dep]>distThresh*0.7){hit=dep;break;}
