@@ -125,7 +125,7 @@ function findBounds(d, w, h) {
 
   // Valid Pokemon card: aspect ratio 0.55–0.85, at least 15% of image each dim
   if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
-    return {left,right,top,bottom,cardW,cardH};
+    return {left,right,top,bottom,cardW,cardH,method:'bg'};
   }
   const gBounds=gradientFallback(d,w,h);
   if(gBounds) return gBounds;
@@ -136,7 +136,7 @@ function varianceFallback(d,w,h){
   // Grid variance — original proven method, now as fallback
   const GX=32,GY=32;
   const cellW=Math.floor(w/GX),cellH=Math.floor(h/GY);
-  if(cellW<2||cellH<2) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
+  if(cellW<2||cellH<2) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method:'var'};
   const vg=[];let maxV=0;
   for(let gy=0;gy<GY;gy++){vg[gy]=[];for(let gx=0;gx<GX;gx++){
     let s=0,sq=0,n=0;const x0=gx*cellW,y0=gy*cellH;
@@ -149,10 +149,10 @@ function varianceFallback(d,w,h){
   for(let gy=0;gy<GY;gy++)for(let gx=0;gx<GX;gx++)if(vg[gy][gx]>floor){
     if(gx<minGX)minGX=gx;if(gx>maxGX)maxGX=gx;if(gy<minGY)minGY=gy;if(gy>maxGY)maxGY=gy;count++;
   }
-  if(count<6||maxGX<minGX||maxGY<minGY) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
+  if(count<6||maxGX<minGX||maxGY<minGY) return {left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method:'var'};
   const left=minGX*cellW,right=Math.min(w-1,(maxGX+1)*cellW);
   const top=minGY*cellH,bottom=Math.min(h-1,(maxGY+1)*cellH);
-  return {left,right,top,bottom,cardW:right-left,cardH:bottom-top};
+  return {left,right,top,bottom,cardW:right-left,cardH:bottom-top,method:'var'};
 }
 
 function gradientFallback(d,w,h){
@@ -199,7 +199,7 @@ function gradientFallback(d,w,h){
   const cardW=right-left,cardH=bottom-top;
   const ratio=cardW/cardH;
   if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85){
-    return {left,right,top,bottom,cardW,cardH};
+    return {left,right,top,bottom,cardW,cardH,method:'grad'};
   }
   return null;
 }
@@ -348,8 +348,8 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
     for(let dep=minDepth;dep<maxDepth-1;dep++){
       if(gArr[dep]>gThresh && dArr[dep]>distThresh*0.7){hit=dep;break;}
     }
+    let bestDep=maxDepth, bestG=0;
     if(hit===maxDepth){
-      let bestDep=maxDepth, bestG=0;
       for(let dep=minDepth;dep<maxDepth-1;dep++){
         if(gArr[dep]>bestG){bestG=gArr[dep];bestDep=dep;}
       }
@@ -360,7 +360,7 @@ function scanBorderWidth(d, w, h, bn, edge, borderColor) {
   results.sort((a,b)=>a-b);
   const med=results[Math.floor(LINES/2)];
   const failures=results.filter(v=>v>=maxDepth-2).length;
-  return {width:med, confidence:failures<=2?'good':failures<=5?'low':'failed', rawValues:results};
+  return {width:med, confidence:failures<=2?'good':failures<=5?'low':'failed', rawValues:results, debug:{gMed,gThresh,distThresh,bestG,bestDep}};
 }
 
 // ─── STEP 6: Full centering calculation ─────────────────────────────────────
@@ -382,7 +382,7 @@ function detectCentering(d, w, h, bn, scanData=null) {
   const confs=[sL.confidence,sR.confidence,sT.confidence,sB.confidence];
   let conf=confs.every(c=>c==='good')?'good':confs.filter(c=>c==='failed').length>=2?'failed':'low';
   if(conf==='good' && clamped) conf='low';
-  return {bL,bR,bT,bB,lrRatio,tbRatio,colorL:cL,colorR:cR,colorT:cT,colorB:cB,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf};
+  return {bL,bR,bT,bB,lrRatio,tbRatio,colorL:cL,colorR:cR,colorT:cT,colorB:cB,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf,clamped};
 }
 
 // ─── Full pipeline ────────────────────────────────────────────────────────────
@@ -449,6 +449,18 @@ function drawOverlay(canvas, result, debug) {
   }
 
   if(debug){
+    // Debug text
+    ctx.font=`${Math.max(10,~~(cW*0.018))}px ${mono}`;
+    ctx.fillStyle='rgba(0,0,0,.7)';
+    ctx.fillRect(cl+6,ct+6,220,72);
+    ctx.fillStyle='#fff';
+    ctx.textAlign='left';
+    ctx.fillText(`bounds: ${bn.method||'?'}`, cl+10, ct+20);
+    ctx.fillText(`clamped: ${c.clamped?'yes':'no'}`, cl+10, ct+34);
+    const dL=c.scanL.debug||{}, dR=c.scanR.debug||{}, dT=c.scanT.debug||{}, dB=c.scanB.debug||{};
+    ctx.fillText(`L gT:${(dL.gThresh||0).toFixed(1)} dT:${(dL.distThresh||0).toFixed(1)}`, cl+10, ct+48);
+    ctx.fillText(`R gT:${(dR.gThresh||0).toFixed(1)} dT:${(dR.distThresh||0).toFixed(1)}`, cl+10, ct+62);
+
     // Color swatches
     const sw=16;
     [['L',c.colorL,cl+4,ct+4],['R',c.colorR,cl+28,ct+4],
