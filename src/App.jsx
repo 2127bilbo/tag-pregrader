@@ -184,8 +184,23 @@ function detectCardAngle(d, w, h, bn) {
 
   if(angles.length===0)return{angle:0,confidence:'failed'};
   angles.sort((a,b)=>a-b);
+
+  // Cluster-based angle selection:
+  // If 2+ sources agree within 2°, use their average — more reliable than raw median.
+  // Handles cases where 1-2 edges get confused by foil gradients (seen in test data).
+  let bestClusterAngle=null, bestClusterSize=0;
+  for(let i=0;i<angles.length;i++){
+    const cluster=angles.filter(a=>Math.abs(a-angles[i])<=2.0);
+    if(cluster.length>bestClusterSize){
+      bestClusterSize=cluster.length;
+      bestClusterAngle=cluster.reduce((s,v)=>s+v,0)/cluster.length;
+    }
+  }
+  // Use cluster if 2+ agree; otherwise fall back to median of all
   const median=angles[Math.floor(angles.length/2)];
-  return{angle:Math.round(median*100)/100,confidence:angles.length>=3?'good':'low',allAngles:angles};
+  const finalAngle = bestClusterSize>=2 ? bestClusterAngle : median;
+
+  return{angle:Math.round(finalAngle*100)/100,confidence:angles.length>=3?'good':'low',allAngles:angles};
 }
 
 // ─── STEPS 3-5: Edge tracing + border measurement ─────────────────────────────
@@ -258,12 +273,14 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
       if(g>bestGrad){bestGrad=g;outerX=px;outerY=py;}
     }
 
-    // Now scan perpendicular INWARD from outer edge, looking for
-    // the next significant gradient peak = inner border/artwork edge
+    // Start at dep=8 to skip the outer card edge gradient zone.
+    // The physical card edge (background→card) creates a huge gradient at dep=2-5
+    // which was overwhelming the real border→artwork gradient deeper inside.
+    // Even thin foil margins are 10-15px at 1400px scale, so dep=8 is safe.
     let peakGrad=0, peakDep=MAX_BORDER;
     let prevLum = lumAt(d,w,h,outerX,outerY);
 
-    for(let dep=2; dep<=MAX_BORDER; dep++){
+    for(let dep=8; dep<=MAX_BORDER; dep++){
       const px=outerX+perpInX*dep, py=outerY+perpInY*dep;
       if(px<0||px>=w||py<0||py>=h) break;
       const curLum = lumAt(d,w,h,px,py);
