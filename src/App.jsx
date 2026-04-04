@@ -53,6 +53,10 @@ function lumAt(d, w, h, x, y) {
 }
 
 // ─── STEP 1: Card boundary (background-color method) ─────────────────────────
+// Handles two scenarios:
+//   A) Card on table with clear background — corners are background
+//   B) Close-up shot where card fills most of frame — corners may be card
+// Detects (B) by checking if corners and center look the same (low contrast)
 function findBounds(d, w, h) {
   const PATCH=12;
 
@@ -77,8 +81,11 @@ function findBounds(d, w, h) {
 
   const bgDist=(r,g,b)=>Math.sqrt((r-bgR)**2+(g-bgG)**2+(b-bgB)**2);
   const centerDist=bgDist(cR,cG,cB);
-  const TOL=Math.max(12,centerDist*0.35);
 
+  // If corners and center look similar, card fills the frame — no background to use
+  if(centerDist < 20) return varianceFallback(d,w,h,'close-up');
+
+  const TOL=Math.max(12,centerDist*0.35);
   const N=24;
   const scanAvg=(dir,pos)=>{
     let dist=0;
@@ -101,12 +108,14 @@ function findBounds(d, w, h) {
   for(let y=h-1;y>h-maxScan;y--) if(scanAvg('B',y)>TOL){bottom=y;break;}
 
   const cardW=right-left,cardH=bottom-top,ratio=cardW/cardH;
-  if(cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85)
-    return{left,right,top,bottom,cardW,cardH};
-  return varianceFallback(d,w,h);
+  // Reject if result is basically the whole image (detection failed)
+  const tooLarge=(right-left)>w*0.92||(bottom-top)>h*0.92;
+  if(!tooLarge&&cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85)
+    return{left,right,top,bottom,cardW,cardH,method:'bg-color',centerDist:Math.round(centerDist)};
+  return varianceFallback(d,w,h,'bg-fallback');
 }
 
-function varianceFallback(d,w,h){
+function varianceFallback(d,w,h,method='variance'){
   const GX=32,GY=32;
   const cellW=Math.floor(w/GX),cellH=Math.floor(h/GY);
   if(cellW<2||cellH<2)return{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
@@ -128,7 +137,7 @@ function varianceFallback(d,w,h){
   if(count<6)return{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1};
   return{left:minGX*cellW,right:Math.min(w-1,(maxGX+1)*cellW),
          top:minGY*cellH,bottom:Math.min(h-1,(maxGY+1)*cellH),
-         cardW:(maxGX-minGX+1)*cellW,cardH:(maxGY-minGY+1)*cellH};
+         cardW:(maxGX-minGX+1)*cellW,cardH:(maxGY-minGY+1)*cellH,method};
 }
 
 // ─── STEP 2: Detect card rotation angle ──────────────────────────────────────
@@ -529,6 +538,25 @@ function CardPanel({label,side,onResult}){
             </div>
           ))}
         </div>
+      </div>}
+
+      {/* Debug text dump — copy/paste to share full data */}
+      {debug&&result&&<div style={{background:'#0a0c10',borderRadius:8,border:'1px solid #0088ff33',padding:10}}>
+        <div style={{fontFamily:mono,fontSize:8,color:'#0088ff',marginBottom:6,textTransform:'uppercase'}}>Debug Dump — copy & paste</div>
+        <textarea readOnly value={JSON.stringify({
+          bounds:{left:result.bounds.left,right:result.bounds.right,top:result.bounds.top,bottom:result.bounds.bottom,cardW:result.bounds.cardW,cardH:result.bounds.cardH,method:result.bounds.method},
+          angle:result.angle,
+          angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
+          centering:{lrRatio:result.centering?.lrRatio,tbRatio:result.centering?.tbRatio,bL:result.centering?.bL,bR:result.centering?.bR,bT:result.centering?.bT,bB:result.centering?.bB},
+          scanDetails:{
+            L:{w:result.centering?.scanL?.width,iqr:result.centering?.scanL?.iqr,conf:result.centering?.scanL?.confidence},
+            R:{w:result.centering?.scanR?.width,iqr:result.centering?.scanR?.iqr,conf:result.centering?.scanR?.confidence},
+            T:{w:result.centering?.scanT?.width,iqr:result.centering?.scanT?.iqr,conf:result.centering?.scanT?.confidence},
+            B:{w:result.centering?.scanB?.width,iqr:result.centering?.scanB?.iqr,conf:result.centering?.scanB?.confidence},
+          }
+        },null,2)}
+        style={{width:'100%',height:180,background:'#060810',color:'#66aaff',border:'none',borderRadius:4,fontFamily:mono,fontSize:8,resize:'none',padding:6,boxSizing:'border-box'}}
+        onClick={e=>e.target.select()}/>
       </div>}
     </div>
   );
