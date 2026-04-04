@@ -136,44 +136,115 @@ function detectCardAngle(d, w, h, bn) {
   return{angle:Math.round(finalAngle*100)/100,confidence:angles.length>=3?'good':'low',allAngles:angles};
 }
 
-// ─── Border measurement (perpendicular edge tracing) ─────────────────────────
+// ─── Border measurement (color-distance from actual card edge) ────────────────
+//
+// Problem with gradient-peak approach (confirmed from debug data):
+//   L/R IQR always 30-100+ because gradient from card artwork (pokeball,
+//   text, swirl) is STRONGER than the border→artwork transition gradient.
+//   T/B work better because top/bottom border strips are more uniform.
+//
+// New approach:
+//   1. Find the actual physical card edge precisely (±15px search around detected bound)
+//   2. Sample border color from 3-8px inward from that real edge
+//   3. Use adaptive threshold = 3x within-border color variance
+//   4. Scan inward until color diverges from border color → border width
+//   This self-calibrates to each card's border material and lighting.
+
+function medianArr(arr) {
+  const s=[...arr].sort((a,b)=>a-b);
+  return s[Math.floor(s.length/2)];
+}
+
 function measureBorderWidth(d, w, h, bn, side, angleDeg) {
   const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
   const rad=angleDeg*Math.PI/180;
   const cosA=Math.cos(rad),sinA=Math.sin(rad);
+
   let alongX,alongY,perpInX,perpInY,edgeStartX,edgeStartY,edgeLen;
   if(side==='T'){alongX=cosA;alongY=sinA;perpInX=-sinA;perpInY=cosA;edgeStartX=cl;edgeStartY=ct;edgeLen=cW;}
   else if(side==='B'){alongX=cosA;alongY=sinA;perpInX=sinA;perpInY=-cosA;edgeStartX=cl;edgeStartY=cb;edgeLen=cW;}
   else if(side==='L'){alongX=-sinA;alongY=cosA;perpInX=cosA;perpInY=sinA;edgeStartX=cl;edgeStartY=ct;edgeLen=cH;}
   else{alongX=-sinA;alongY=cosA;perpInX=-cosA;perpInY=-sinA;edgeStartX=cr;edgeStartY=ct;edgeLen=cH;}
-  const SAMPLES=32,MAX_BORDER=Math.round(Math.min(cW,cH)*0.20);
-  const measurements=[];
+
+  const SAMPLES=32;
+  const MAX_BORDER=Math.round(Math.min(cW,cH)*0.22);
+  const EDGE_SEARCH=15; // how far to search for actual physical card edge
+
+  // Phase 1: Find actual card edges + sample border color
+  const edgePositions=[];
+  const borderColorSamples=[];
+
   for(let si=0;si<SAMPLES;si++){
     const t=edgeLen*(0.10+0.80*si/(SAMPLES-1));
-    const ex=edgeStartX+alongX*t,ey=edgeStartY+alongY*t;
+    const ex=edgeStartX+alongX*t;
+    const ey=edgeStartY+alongY*t;
+
+    // Find actual card edge: search ±EDGE_SEARCH px around detected bound
+    // for the sharpest luminance gradient (background→card transition)
     let outerX=ex,outerY=ey,bestGrad=0;
-    for(let dep=-3;dep<=6;dep++){
+    for(let dep=-EDGE_SEARCH;dep<=EDGE_SEARCH;dep++){
       const px=ex+perpInX*dep,py=ey+perpInY*dep;
       if(px<0||px>=w||py<0||py>=h)continue;
-      const g=Math.abs(lumAt(d,w,h,px-perpInX,py-perpInY)-lumAt(d,w,h,px+perpInX,py+perpInY));
+      const g=Math.abs(
+        lumAt(d,w,h,px-perpInX*2,py-perpInY*2)-
+        lumAt(d,w,h,px+perpInX*2,py+perpInY*2)
+      );
       if(g>bestGrad){bestGrad=g;outerX=px;outerY=py;}
     }
-    let peakGrad=0,peakDep=MAX_BORDER;
-    for(let dep=8;dep<=MAX_BORDER;dep++){
-      const px=outerX+perpInX*dep,py=outerY+perpInY*dep;
-      if(px<0||px>=w||py<0||py>=h)break;
-      const g=Math.abs(lumAt(d,w,h,px,py)-lumAt(d,w,h,CLAMP(px-perpInX*2,0,w-1),CLAMP(py-perpInY*2,0,h-1)));
-      if(g>peakGrad&&g>8){peakGrad=g;peakDep=dep;}
+    edgePositions.push({x:outerX,y:outerY,foundGrad:bestGrad});
+
+    // Sample border color from 3-10px inward from the real card edge
+    for(let dep=3;dep<=10;dep++){
+      const px=CLAMP(Math.round(outerX+perpInX*dep),0,w-1);
+      const py=CLAMP(Math.round(outerY+perpInY*dep),0,h-1);
+      const [r,g,b]=PX(d,w,px,py);
+      borderColorSamples.push([r,g,b]);
     }
-    if(peakDep<MAX_BORDER-1)measurements.push(peakDep);
   }
-  if(measurements.length<4)return{width:0,confidence:'failed',peakGrad:0,iqr:999};
+
+  // Compute median border color (robust to outliers at corners)
+  const brR=medianArr(borderColorSamples.map(s=>s[0]));
+  const brG=medianArr(borderColorSamples.map(s=>s[1]));
+  const brB=medianArr(borderColorSamples.map(s=>s[2]));
+  const colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
+
+  // Adaptive threshold: 3x median within-border color distance
+  // Adapts to solid blue border (low variance → tight threshold)
+  // vs foil/holo border (high variance → looser threshold)
+  const dists=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
+  const withinBorderDist=medianArr(dists);
+  const TOL=Math.max(22, withinBorderDist*3.0);
+
+  // Phase 2: From each actual edge, scan inward until color diverges
+  const measurements=[];
+  for(let si=0;si<SAMPLES;si++){
+    const{x:outerX,y:outerY}=edgePositions[si];
+    let borderWidth=MAX_BORDER;
+
+    // Skip first 2px (right at card edge, can have clipping artifacts)
+    for(let dep=3;dep<=MAX_BORDER;dep++){
+      const px=CLAMP(Math.round(outerX+perpInX*dep),0,w-1);
+      const py=CLAMP(Math.round(outerY+perpInY*dep),0,h-1);
+      const [r,g,b]=PX(d,w,px,py);
+      if(colorDist(r,g,b)>TOL){borderWidth=dep;break;}
+    }
+    if(borderWidth<MAX_BORDER-1)measurements.push(borderWidth);
+  }
+
+  if(measurements.length<4)return{width:0,confidence:'failed',iqr:999,borderColor:{r:brR,g:brG,b:brB},tol:Math.round(TOL)};
   measurements.sort((a,b)=>a-b);
   const med=measurements[Math.floor(measurements.length/2)];
   const q1=measurements[Math.floor(measurements.length*0.25)];
   const q3=measurements[Math.floor(measurements.length*0.75)];
   const iqr=q3-q1;
-  return{width:med,confidence:iqr<=4?'good':iqr<=10?'low':'failed',iqr,rawValues:measurements,sampleCount:measurements.length};
+  return{
+    width:med,
+    confidence:iqr<=5?'good':iqr<=12?'low':'failed',
+    iqr,
+    borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},
+    tol:Math.round(TOL),
+    rawValues:measurements,
+  };
 }
 
 function detectCentering(d, w, h, bn, angleDeg) {
@@ -465,7 +536,12 @@ function CardPanel({label,side,onResult}){
           appliedAngle:activeAngle,
           angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
           centering:{lrRatio,tbRatio,bL,bR,bT,bB},
-          scanDetails:{L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence},R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence},T:{w:c.scanT?.width,iqr:c.scanT?.iqr,conf:c.scanT?.confidence},B:{w:c.scanB?.width,iqr:c.scanB?.iqr,conf:c.scanB?.confidence}},
+          scanDetails:{
+            L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,color:c.scanL?.borderColor,tol:c.scanL?.tol},
+            R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,color:c.scanR?.borderColor,tol:c.scanR?.tol},
+            T:{w:c.scanT?.width,iqr:c.scanT?.iqr,conf:c.scanT?.confidence,color:c.scanT?.borderColor,tol:c.scanT?.tol},
+            B:{w:c.scanB?.width,iqr:c.scanB?.iqr,conf:c.scanB?.confidence,color:c.scanB?.borderColor,tol:c.scanB?.tol},
+          },
           borderOverrides
         },null,2)}
         style={{width:'100%',height:160,background:'#060810',color:'#66aaff',border:'none',borderRadius:4,fontFamily:mono,fontSize:8,resize:'none',padding:6,boxSizing:'border-box'}}
