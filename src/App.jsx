@@ -363,20 +363,33 @@ function detectCornerDings(d, w, h, bn, side) {
     return { name, effectiveWear, avgSharp, isUniformBright, fray, fill, angle, cx, cy };
   });
 
-  // ── Pass 2: cross-corner symmetry suppression (holo only) ───────────────
-  // KEY DIAGNOSTIC from 15-card dataset:
-  //   False positives → all 4 corners score F:980/Fi:975 identically.
-  //   Real wear → asymmetric; corners wear at different rates from handling.
-  //
-  // If 3+ corners have wear ratios within 8% of each other AND the spread
-  // across all 4 is under 10%, it's foil glow not damage.
-  // Safety valve: don't suppress if any corner exceeds 35% (genuinely damaged card).
-  let suppressAll = false;
+  // ── Pass 2: holo suppression ─────────────────────────────────────────────
+  // Corner detection does not work reliably on holo/foil cards.
+  // Three separate noise sources contaminate the white-pixel signal:
+  //   1. Foil glow — bright neutral pixels from reflective coating
+  //   2. Card artwork — full-art cards have light-colored interior artwork
+  //   3. Rounded corner stock — the physical card tip exposes white card-stock edge
+  // 13/14 foil cards in the training dataset produced false positive corners.
+  // Until a fundamentally different approach is available (e.g. multi-angle lighting),
+  // suppress corner DINGS on holo cards entirely.
+  // Non-holo cards (WOTC, standard bordered) are unaffected — detector works there.
   if (isHolo) {
-    const wears = cornerData.map(c => c.effectiveWear);
-    const maxW = Math.max(...wears), minW = Math.min(...wears);
-    const nearMax = wears.filter(v => maxW - v < 0.08).length;
-    if (nearMax >= 3 && (maxW - minW) < 0.10 && maxW < 0.35) suppressAll = true;
+    // Still populate details for display (shows W% values in Corners tab)
+    // but mark hasDing=false and return no corner DINGS
+    for (const c of cornerData) {
+      let fray=1000, fill=1000;
+      if(c.effectiveWear>0.30){fray-=20;fill-=25;}
+      else if(c.effectiveWear>0.15){fray-=10;fill-=12;}
+      else if(c.effectiveWear>0.05){fray-=3;fill-=5;}
+      details.push({
+        name:c.name, fray, fill,
+        angle: side==="front" ? 1000 : undefined,
+        whiteRatio: Math.round(c.effectiveWear*1000)/10,
+        sharpness: Math.round(c.avgSharp*10)/10,
+        hasDing: false, cropX:c.cx, cropY:c.cy, cropSize:cs,
+      });
+    }
+    return { dings:[], details };
   }
 
   // ── Pass 3: decide DING per corner and build output ─────────────────────
