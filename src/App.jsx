@@ -418,14 +418,22 @@ function detectCentering(d, w, h, bn, angleDeg, bgColor) {
   const eL=edgeBandWidth(d,w,h,bn,'L');
   const eR=edgeBandWidth(d,w,h,bn,'R');
 
-  const pick=(s,e)=>{
-    if(s.confidence==='good') return s;
-    if(s.mode && s.mode.startsWith('grad') && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
-    if(s.iqr>20 && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
-    if(s.width===0 && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
-    return s;
+  const pick=(s,e,sideDim,isTB)=>{
+    const minOk=Math.max(3, sideDim*0.008);
+    const maxOk=sideDim*(isTB?0.12:0.10);
+    const inRange=v=>v>=minOk && v<=maxOk;
+
+    if(s.confidence==='good' && inRange(s.width)) return s;
+
+    const eOk = e.width>0 && inRange(e.width);
+    if(eOk) return {...s,width:e.width,confidence:'low',mode:e.mode||'edgeband'};
+
+    if(inRange(s.width)) return s;
+
+    const clamped = Math.min(maxOk, Math.max(minOk, s.width||0));
+    return {...s,width:clamped,confidence:'low',mode:'clamp'};
   };
-  const sT2=pick(sT,eT), sB2=pick(sB,eB), sL2=pick(sL,eL), sR2=pick(sR,eR);
+  const sT2=pick(sT,eT,cH,true), sB2=pick(sB,eB,cH,true), sL2=pick(sL,eL,cW,false), sR2=pick(sR,eR,cW,false);
   const bL=sL2.width,bR=sR2.width,bT=sT2.width,bB=sB2.width;
   const lrT=bL+bR,tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
