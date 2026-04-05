@@ -386,13 +386,18 @@ function detectCornerDings(d, w, h, bn, side) {
 
   // ── Pass 3: decide DING per corner and build output ─────────────────────
   for (const c of cornerData) {
-    // Standard threshold: 10% white ratio or sharpness collapse
-    // Holo threshold: 20% (foil creates inherently higher white ratio than paper)
-    const wearThresh  = isHolo ? 0.20 : 0.10;
-    const sharpThresh = isHolo ? 2    : 4;
+    // More conservative detection: require BOTH wear AND sharpness issues
+    // unless wear is very high (>25% = obvious damage)
+    // Thresholds raised to reduce false positives on clean cards
+    const wearThresh  = isHolo ? 0.22 : 0.12;  // Was 0.20/0.10
+    const sharpThresh = isHolo ? 2    : 3;     // Was 2/4
 
-    const hasWear = !c.isUniformBright
-      && (c.effectiveWear > wearThresh || c.avgSharp < sharpThresh);
+    // Require both conditions (AND) unless wear is severe
+    const severeWear = c.effectiveWear > 0.25;
+    const hasWear = !c.isUniformBright && (
+      severeWear ||  // Obvious damage - don't need sharpness confirmation
+      (c.effectiveWear > wearThresh && c.avgSharp < sharpThresh)  // Both must fail
+    );
 
     if(hasWear){
       dings.push({
