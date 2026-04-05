@@ -386,18 +386,18 @@ function detectCornerDings(d, w, h, bn, side) {
 
   // ── Pass 3: decide DING per corner and build output ─────────────────────
   for (const c of cornerData) {
-    // More conservative detection: require BOTH wear AND sharpness issues
-    // unless wear is very high (>25% = obvious damage)
-    // Thresholds raised to reduce false positives on clean cards
-    const wearThresh  = isHolo ? 0.22 : 0.12;  // Was 0.20/0.10
-    const sharpThresh = isHolo ? 2    : 3;     // Was 2/4
+    // Conservative detection: ALWAYS require both wear AND sharpness issues
+    // High W% alone is NOT enough - card backs often have light-colored designs
+    // Real wear shows: high white ratio + LOW sharpness (corner is soft/rounded)
+    // False positive shows: high white ratio + HIGH sharpness (corner is still sharp)
+    const wearThresh  = isHolo ? 0.22 : 0.15;  // Raised from 0.12
+    const sharpThresh = isHolo ? 3    : 5;     // Raised - require clearly soft corners
 
-    // Require both conditions (AND) unless wear is severe
-    const severeWear = c.effectiveWear > 0.25;
-    const hasWear = !c.isUniformBright && (
-      severeWear ||  // Obvious damage - don't need sharpness confirmation
-      (c.effectiveWear > wearThresh && c.avgSharp < sharpThresh)  // Both must fail
-    );
+    // ALWAYS require both conditions - no bypass for "severe wear"
+    // because card design (especially backs) can have 50%+ white naturally
+    const hasWear = !c.isUniformBright
+      && c.effectiveWear > wearThresh
+      && c.avgSharp < sharpThresh;
 
     if(hasWear){
       dings.push({
