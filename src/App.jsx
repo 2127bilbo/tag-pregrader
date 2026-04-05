@@ -251,23 +251,22 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   let colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
 
   // Recompute border color after filtering obvious outliers (glare/text)
-  let dists=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
-  const medDist=medianArr(dists);
+  let dists0=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
+  const medDist=medianArr(dists0);
   const keep=borderColorSamples.filter(([r,g,b])=>colorDist(r,g,b)<=medDist*2.2);
   if(keep.length>=Math.max(10, borderColorSamples.length*0.25)){
     brR=medianArr(keep.map(s=>s[0]));
     brG=medianArr(keep.map(s=>s[1]));
     brB=medianArr(keep.map(s=>s[2]));
     colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
-    dists=keep.map(([r,g,b])=>colorDist(r,g,b));
+    dists0=keep.map(([r,g,b])=>colorDist(r,g,b));
   }
 
 
   // Adaptive threshold: 3x median within-border color distance
   // Adapts to solid blue border (low variance → tight threshold)
   // vs foil/holo border (high variance → looser threshold)
-  const dists=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
-  const withinBorderDist=medianArr(dists);
+  const withinBorderDist=medianArr(dists0);
   const TOL=Math.min(80, Math.max(18, withinBorderDist*2.5));
 
   // Phase 2: From each actual edge, scan inward until color diverges
