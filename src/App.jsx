@@ -41,79 +41,119 @@ function lumAt(d, w, h, x, y) {
 
 // ─── Card boundary detection ──────────────────────────────────────────────────
 function findBounds(d, w, h) {
-  const PATCH=12;
-  let bgR=0,bgG=0,bgB=0,bgN=0;
-  for(const [cx,cy] of [[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]]){
-    for(let dy=0;dy<PATCH;dy++) for(let dx=0;dx<PATCH;dx++){
-      const[r,g,b]=PX(d,w,CLAMP(cx+dx,0,w-1),CLAMP(cy+dy,0,h-1));
-      bgR+=r;bgG+=g;bgB+=b;bgN++;
+  const GX = 32, GY = 32;
+  const cellW = Math.floor(w / GX), cellH = Math.floor(h / GY);
+  if (cellW < 2 || cellH < 2) return { left:0, right:w-1, top:0, bottom:h-1, cardW:w-1, cardH:h-1, method:'var' };
+
+  const vg = [];
+  let maxV = 0;
+  for (let gy = 0; gy < GY; gy++) {
+    vg[gy] = [];
+    for (let gx = 0; gx < GX; gx++) {
+      let s=0, sq=0, n=0;
+      const x0=gx*cellW, y0=gy*cellH;
+      const step = Math.max(1, Math.floor(Math.min(cellW,cellH)/5));
+      for (let y=y0; y<y0+cellH && y<h; y+=step)
+        for (let x=x0; x<x0+cellW && x<w; x+=step)
+          { const v=LUM(...PX(d,w,x,y)); s+=v; sq+=v*v; n++; }
+      const variance = n>0 ? sq/n-(s/n)**2 : 0;
+      vg[gy][gx] = variance;
+      if (variance > maxV) maxV = variance;
     }
   }
-  bgR/=bgN;bgG/=bgN;bgB/=bgN;
-  let cR=0,cG=0,cB=0,cN=0;
-  const CX=Math.round(w/2),CY=Math.round(h/2);
-  for(let dy=-PATCH;dy<=PATCH;dy++) for(let dx=-PATCH;dx<=PATCH;dx++){
-    const[r,g,b]=PX(d,w,CLAMP(CX+dx,0,w-1),CLAMP(CY+dy,0,h-1));
-    cR+=r;cG+=g;cB+=b;cN++;
+
+  const floor = Math.max(30, maxV * 0.12);
+  let minGX=GX, maxGX=-1, minGY=GY, maxGY=-1, count=0;
+  for (let gy=0; gy<GY; gy++)
+    for (let gx=0; gx<GX; gx++)
+      if (vg[gy][gx] > floor) {
+        if (gx < minGX) minGX=gx; if (gx > maxGX) maxGX=gx;
+        if (gy < minGY) minGY=gy; if (gy > maxGY) maxGY=gy;
+        count++;
+      }
+
+  if (count < 6 || maxGX < minGX || maxGY < minGY) {
+    return edgeScanFallback(d, w, h);
   }
-  cR/=cN;cG/=cN;cB/=cN;
-  const bgDist=(r,g,b)=>Math.sqrt((r-bgR)**2+(g-bgG)**2+(b-bgB)**2);
-  const centerDist=bgDist(cR,cG,cB);
-  if(centerDist<20) return varianceFallback(d,w,h,'close-up');
-  const TOL=Math.max(12,centerDist*0.35);
-  const N=24;
-  const scanAvg=(dir,pos)=>{
-    let dist=0;
-    for(let i=0;i<N;i++){
-      const f=0.25+0.5*i/(N-1);
-      let px,py;
-      if(dir==='L'||dir==='R'){px=pos;py=Math.round(h*f);}
-      else{px=Math.round(w*f);py=pos;}
-      const[r,g,b]=PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1));
-      dist+=bgDist(r,g,b);
+
+  let left   = minGX * cellW;
+  let right  = Math.min(w-1, (maxGX+1) * cellW);
+  let top    = minGY * cellH;
+  let bottom = Math.min(h-1, (maxGY+1) * cellH);
+
+  const scanLimit = Math.min(cellW*2, 60);
+  const sampleN = 16;
+
+  const edgeLum = (axis, pos, lo, hi) => {
+    let s=0;
+    for (let i=0; i<sampleN; i++) {
+      const f = lo + (hi-lo)*(i+0.5)/sampleN;
+      const px = axis==='x' ? Math.round(pos) : Math.round(f);
+      const py = axis==='x' ? Math.round(f)   : Math.round(pos);
+      s += LUM(...PX(d,w,CLAMP(px,0,w-1),CLAMP(py,0,h-1)));
     }
-    return dist/N;
+    return s/sampleN;
   };
-  let left=0,right=w-1,top=0,bottom=h-1;
-  const maxScan=Math.min(w,h)*0.45;
-  for(let x=0;x<maxScan;x++)     if(scanAvg('L',x)>TOL){left=x;break;}
-  for(let x=w-1;x>w-maxScan;x--) if(scanAvg('R',x)>TOL){right=x;break;}
-  for(let y=0;y<maxScan;y++)     if(scanAvg('T',y)>TOL){top=y;break;}
-  for(let y=h-1;y>h-maxScan;y--) if(scanAvg('B',y)>TOL){bottom=y;break;}
-  const cardW=right-left,cardH=bottom-top,ratio=cardW/cardH;
-  const tooLarge=(right-left)>w*0.92||(bottom-top)>h*0.92;
-  if(!tooLarge&&cardW>w*0.15&&cardH>h*0.15&&ratio>0.55&&ratio<0.85)
-    return{left,right,top,bottom,cardW,cardH,method:'bg-color'};
-  return varianceFallback(d,w,h,'bg-fallback');
-}
 
-function varianceFallback(d,w,h,method='variance'){
-  const GX=32,GY=32;
-  const cellW=Math.floor(w/GX),cellH=Math.floor(h/GY);
-  if(cellW<2||cellH<2)return{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method};
-  const vg=[];let maxV=0;
-  for(let gy=0;gy<GY;gy++){vg[gy]=[];for(let gx=0;gx<GX;gx++){
-    let s=0,sq=0,n=0;
-    const x0=gx*cellW,y0=gy*cellH,step=Math.max(1,Math.floor(Math.min(cellW,cellH)/5));
-    for(let y=y0;y<y0+cellH&&y<h;y+=step)for(let x=x0;x<x0+cellW&&x<w;x+=step)
-      {const v=LUM(...PX(d,w,x,y));s+=v;sq+=v*v;n++;}
-    const variance=n>0?sq/n-(s/n)**2:0;
-    vg[gy][gx]=variance;if(variance>maxV)maxV=variance;
-  }}
-  const floor=Math.max(30,maxV*0.12);
-  let minGX=GX,maxGX=-1,minGY=GY,maxGY=-1,count=0;
-  for(let gy=0;gy<GY;gy++)for(let gx=0;gx<GX;gx++)if(vg[gy][gx]>floor){
-    if(gx<minGX)minGX=gx;if(gx>maxGX)maxGX=gx;
-    if(gy<minGY)minGY=gy;if(gy>maxGY)maxGY=gy;count++;
+  let bestContrast=0, bestPos=left;
+  for (let i=0; i<scanLimit; i++) {
+    const x=left+i; if(x>=right-10) break;
+    const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x-1,top,bottom));
+    if(c>bestContrast){bestContrast=c;bestPos=x;}
   }
-  if(count<6)return{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method};
-  return{left:minGX*cellW,right:Math.min(w-1,(maxGX+1)*cellW),
-         top:minGY*cellH,bottom:Math.min(h-1,(maxGY+1)*cellH),
-         cardW:(maxGX-minGX+1)*cellW,cardH:(maxGY-minGY+1)*cellH,method};
+  left=bestPos;
+
+  bestContrast=0; bestPos=right;
+  for (let i=0; i<scanLimit; i++) {
+    const x=right-i; if(x<=left+10) break;
+    const c=Math.abs(edgeLum('x',x,top,bottom)-edgeLum('x',x+1,top,bottom));
+    if(c>bestContrast){bestContrast=c;bestPos=x;}
+  }
+  right=bestPos;
+
+  bestContrast=0; bestPos=top;
+  for (let i=0; i<scanLimit; i++) {
+    const y=top+i; if(y>=bottom-10) break;
+    const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y-1,left,right));
+    if(c>bestContrast){bestContrast=c;bestPos=y;}
+  }
+  top=bestPos;
+
+  bestContrast=0; bestPos=bottom;
+  for (let i=0; i<scanLimit; i++) {
+    const y=bottom-i; if(y<=top+10) break;
+    const c=Math.abs(edgeLum('y',y,left,right)-edgeLum('y',y+1,left,right));
+    if(c>bestContrast){bestContrast=c;bestPos=y;}
+  }
+  bottom=bestPos;
+
+  const cardW=right-left, cardH=bottom-top;
+  if (cardW > w*0.08 && cardH > h*0.08) {
+    return { left, right, top, bottom, cardW, cardH, method:'var' };
+  }
+
+  return edgeScanFallback(d, w, h);
 }
 
-// ─── Angle detection ──────────────────────────────────────────────────────────
-function detectCardAngle(d, w, h, bn) {
+function edgeScanFallback(d, w, h) {
+  const thresholds = [15, 25, 40, 60];
+  let best=null, bestArea=0;
+  for (const t of thresholds) {
+    let l=0, r=w-1, tp=0, b=h-1;
+    const rowVar=(y,x1,x2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((x2-x1)/60));for(let x=x1;x<x2;x+=st){const v=LUM(...PX(d,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    const colVar=(x,y1,y2)=>{let s=0,q=0,n=0;const st=Math.max(1,~~((y2-y1)/60));for(let y=y1;y<y2;y+=st){const v=LUM(...PX(d,w,CLAMP(x,0,w-1),CLAMP(y,0,h-1)));s+=v;q+=v*v;n++;}return n>0?q/n-(s/n)**2:0;};
+    for(let x=0;x<w*.4;x++) if(colVar(x,~~(h*.1),~~(h*.9))>t){l=x;break;}
+    for(let x=w-1;x>w*.6;x--) if(colVar(x,~~(h*.1),~~(h*.9))>t){r=x;break;}
+    for(let y=0;y<h*.4;y++) if(rowVar(y,~~(w*.1),~~(w*.9))>t){tp=y;break;}
+    for(let y=h-1;y>h*.6;y--) if(rowVar(y,~~(w*.1),~~(w*.9))>t){b=y;break;}
+    const area=(r-l)*(b-tp);
+    if(area>bestArea&&(r-l)>w*0.15&&(b-tp)>h*0.15){bestArea=area;best={left:l,right:r,top:tp,bottom:b,cardW:r-l,cardH:b-tp,method:'edge'};}
+  }
+  return best||{left:0,right:w-1,top:0,bottom:h-1,cardW:w-1,cardH:h-1,method:'edge'};
+}
+
+// ????????? Angle detection ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+function detectCardAngle(d, w, h, bn) {(d, w, h, bn) {
   const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
   const PROBES=24, SEARCH=Math.round(Math.min(cW,cH)*0.07);
   const findEdgeY=(x,nearY)=>{let best=nearY,bestG=0;for(let y=CLAMP(nearY-SEARCH,0,h-2);y<=CLAMP(nearY+SEARCH,0,h-2);y++){const g=Math.abs(LUM(...PX(d,w,x,CLAMP(y-2,0,h-1)))-LUM(...PX(d,w,x,CLAMP(y+2,0,h-1))));if(g>bestG){bestG=g;best=y;}}return bestG>6?best:null;};
@@ -233,15 +273,45 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
     if(borderWidth<MAX_BORDER-1)measurements.push(borderWidth);
   }
 
-  if(measurements.length<4)return{width:0,confidence:'failed',iqr:999,borderColor:{r:brR,g:brG,b:brB},tol:Math.round(TOL)};
+  // Gradient-based fallback (edge-band peaks) when color scan is unstable
+  const gradMeasurements=[];
+  for(const {x:outerX,y:outerY} of edgePositions){
+    const grads=[];
+    for(let dep=2;dep<=MAX_BORDER-2;dep++){
+      const a=lumAt(d,w,h,outerX+perpInX*(dep-1),outerY+perpInY*(dep-1));
+      const b=lumAt(d,w,h,outerX+perpInX*(dep+1),outerY+perpInY*(dep+1));
+      grads[dep]=Math.abs(b-a);
+    }
+    const gMean=grads.reduce((s,v)=>s+(v||0),0)/(grads.length||1);
+    const gStd=Math.sqrt(grads.reduce((s,v)=>s+((v||0)-gMean)**2,0)/(grads.length||1));
+    const gThresh=Math.max(4, gMean+gStd*2.0);
+    let outer=null, inner=null;
+    for(let dep=2;dep<=MAX_BORDER-2;dep++) if(grads[dep]>gThresh){outer=dep;break;}
+    if(outer!==null){
+      for(let dep=outer+3;dep<=MAX_BORDER-2;dep++) if(grads[dep]>gThresh){inner=dep;break;}
+    }
+    if(inner) gradMeasurements.push(inner);
+  }
+
+  if(measurements.length<4){
+    if(gradMeasurements.length>=4){
+      gradMeasurements.sort((a,b)=>a-b);
+      const med=gradMeasurements[Math.floor(gradMeasurements.length/2)];
+      return{width:med,confidence:'low',iqr:999,borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL),rawValues:gradMeasurements,mode:'grad'};
+    }
+    return{width:0,confidence:'failed',iqr:999,borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL)};
+  }
   measurements.sort((a,b)=>a-b);
   const med=measurements[Math.floor(measurements.length/2)];
   const q1=measurements[Math.floor(measurements.length*0.25)];
   const q3=measurements[Math.floor(measurements.length*0.75)];
   const iqr=q3-q1;
-  // IQR thresholds: ≤8 = good, ≤20 = low, >20 = failed
-  // Card backs have "Pokémon" text right at border edge → IQR naturally up to 26
-  // That's still a usable measurement, not a failure
+  if((iqr>24 || med>MAX_BORDER*0.7) && gradMeasurements.length>=4){
+    gradMeasurements.sort((a,b)=>a-b);
+    const gmed=gradMeasurements[Math.floor(gradMeasurements.length/2)];
+    return{width:gmed,confidence:'low',iqr, borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL),rawValues:gradMeasurements,mode:'grad'};
+  }
+  // IQR thresholds: <=8 = good, <=20 = low, >20 = failed
   return{
     width:med,
     confidence:iqr<=8?'good':iqr<=20?'low':'failed',
