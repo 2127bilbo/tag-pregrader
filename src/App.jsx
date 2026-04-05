@@ -190,6 +190,180 @@ function detectCardAngle(d, w, h, bn) {
 //   4. Scan inward until color diverges from border color → border width
 //   This self-calibrates to each card's border material and lighting.
 
+
+function fitLine(points, mode){
+  if(points.length<6) return null;
+  if(mode==='x'){ // x = m*y + b
+    const n=points.length;
+    let sy=0,sx=0,syy=0,syx=0;
+    for(const p of points){sy+=p.y;sx+=p.x;syy+=p.y*p.y;syx+=p.y*p.x;}
+    const den=n*syy-sy*sy;
+    if(Math.abs(den)<1e-6) return null;
+    const m=(n*syx-sy*sx)/den; const b=(sx-m*sy)/n;
+    return {a:-m,b:1,c:-b}; // line ax+by+c=0
+  }else{ // y = m*x + b
+    const n=points.length;
+    let sx=0,sy=0,sxx=0,sxy=0;
+    for(const p of points){sx+=p.x;sy+=p.y;sxx+=p.x*p.x;sxy+=p.x*p.y;}
+    const den=n*sxx-sx*sx;
+    if(Math.abs(den)<1e-6) return null;
+    const m=(n*sxy-sx*sy)/den; const b=(sy-m*sx)/n;
+    return {a:-m,b:1,c:-b};
+  }
+}
+
+function intersectLines(l1,l2){
+  const det=l1.a*l2.b-l2.a*l1.b;
+  if(Math.abs(det)<1e-6) return null;
+  const x=(l2.b*(-l1.c)-l1.b*(-l2.c))/det;
+  const y=(l1.a*(-l2.c)-l2.a*(-l1.c))/det;
+  return {x,y};
+}
+
+function detectCardLines(d,w,h,bn){
+  const {left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
+  const PROBES=26;
+  const SEARCH=Math.round(Math.min(cW,cH)*0.08);
+  const findEdgeY=(x,nearY)=>{let best=nearY,bestG=0;for(let y=CLAMP(nearY-SEARCH,0,h-2);y<=CLAMP(nearY+SEARCH,0,h-2);y++){const g=Math.abs(LUM(...PX(d,w,x,CLAMP(y-2,0,h-1)))-LUM(...PX(d,w,x,CLAMP(y+2,0,h-1))));if(g>bestG){bestG=g;best=y;}}return bestG>6?best:null;};
+  const findEdgeX=(y,nearX)=>{let best=nearX,bestG=0;for(let x=CLAMP(nearX-SEARCH,0,w-2);x<=CLAMP(nearX+SEARCH,0,w-2);x++){const g=Math.abs(LUM(...PX(d,w,CLAMP(x-2,0,w-1),y))-LUM(...PX(d,w,CLAMP(x+2,0,w-1),y)));if(g>bestG){bestG=g;best=x;}}return bestG>6?best:null;};
+
+  const topPts=[], botPts=[], leftPts=[], rightPts=[];
+  for(let i=0;i<PROBES;i++){
+    const fx=0.05+0.90*i/(PROBES-1);
+    const x=Math.round(cl+cW*fx);
+    const yT=findEdgeY(x,ct); if(yT!==null) topPts.push({x,y:yT});
+    const yB=findEdgeY(x,cb); if(yB!==null) botPts.push({x,y:yB});
+  }
+  for(let i=0;i<PROBES;i++){
+    const fy=0.05+0.90*i/(PROBES-1);
+    const y=Math.round(ct+cH*fy);
+    const xL=findEdgeX(y,cl); if(xL!==null) leftPts.push({x:xL,y});
+    const xR=findEdgeX(y,cr); if(xR!==null) rightPts.push({x:xR,y});
+  }
+
+  const top=fitLine(topPts,'y');
+  const bottom=fitLine(botPts,'y');
+  const left=fitLine(leftPts,'x');
+  const right=fitLine(rightPts,'x');
+  if(!(top&&bottom&&left&&right)) return null;
+  return {top,bottom,left,right};
+}
+
+function computeCardCorners(lines){
+  const tl=intersectLines(lines.top,lines.left);
+  const tr=intersectLines(lines.top,lines.right);
+  const br=intersectLines(lines.bottom,lines.right);
+  const bl=intersectLines(lines.bottom,lines.left);
+  if(!(tl&&tr&&br&&bl)) return null;
+  return {tl,tr,br,bl};
+}
+
+function solve8(A,b){
+  const n=8;
+  for(let i=0;i<n;i++){
+    // pivot
+    let maxRow=i; let maxVal=Math.abs(A[i][i]);
+    for(let r=i+1;r<n;r++){ if(Math.abs(A[r][i])>maxVal){maxVal=Math.abs(A[r][i]);maxRow=r;} }
+    if(maxVal<1e-8) return null;
+    if(maxRow!==i){A[i],A[maxRow]=A[maxRow],A[i]; b[i],b[maxRow]=b[maxRow],b[i];}
+    const diag=A[i][i];
+    for(let c=i;c<n;c++) A[i][c]/=diag; b[i]/=diag;
+    for(let r=0;r<n;r++) if(r!=i){
+      const f=A[r][i];
+      for(let c=i;c<n;c++) A[r][c]-=f*A[i][c];
+      b[r]-=f*b[i];
+    }
+  }
+  return b;
+}
+
+function computeHomography(srcPts, dstPts){
+  const A=[], B=[];
+  for(let i=0;i<4;i++){
+    const xs=srcPts[i].x, ys=srcPts[i].y;
+    const xd=dstPts[i].x, yd=dstPts[i].y;
+    A.push([xs,ys,1,0,0,0,-xd*xs,-xd*ys]); B.push(xd);
+    A.push([0,0,0,xs,ys,1,-yd*xs,-yd*ys]); B.push(yd);
+  }
+  const h=solve8(A,B); if(!h) return null;
+  return [h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],1];
+}
+
+function warpPerspective(srcData,w,h,corners){
+  const topW=Math.hypot(corners.tr.x-corners.tl.x, corners.tr.y-corners.tl.y);
+  const botW=Math.hypot(corners.br.x-corners.bl.x, corners.br.y-corners.bl.y);
+  const leftH=Math.hypot(corners.bl.x-corners.tl.x, corners.bl.y-corners.tl.y);
+  const rightH=Math.hypot(corners.br.x-corners.tr.x, corners.br.y-corners.tr.y);
+  let outW=Math.max(10, Math.round((topW+botW)/2));
+  let outH=Math.max(10, Math.round((leftH+rightH)/2));
+  const maxDim=1000;
+  const scale=Math.min(1, maxDim/Math.max(outW,outH));
+  outW=Math.round(outW*scale);
+  outH=Math.round(outH*scale);
+  const srcPts=[corners.tl,corners.tr,corners.br,corners.bl];
+  const dstPts=[{x:0,y:0},{x:outW-1,y:0},{x:outW-1,y:outH-1},{x:0,y:outH-1}];
+  const H=computeHomography(dstPts, srcPts); // map dst -> src
+  if(!H) return null;
+  const out=new Uint8ClampedArray(outW*outH*4);
+  for(let y=0;y<outH;y++){
+    for(let x=0;x<outW;x++){
+      const denom=H[6]*x+H[7]*y+H[8];
+      const sx=(H[0]*x+H[1]*y+H[2])/denom;
+      const sy=(H[3]*x+H[4]*y+H[5])/denom;
+      const i=(y*outW+x)*4;
+      if(sx>=0&&sx<w-1&&sy>=0&&sy<h-1){
+        const r=lumAt(srcData,w,h,sx,sy); // use lumAt for smoothness then map to rgb
+        const x0=Math.floor(sx), y0=Math.floor(sy);
+        const [pr,pg,pb]=PX(srcData,w,x0,y0);
+        out[i]=pr; out[i+1]=pg; out[i+2]=pb; out[i+3]=255;
+      }else{out[i]=out[i+1]=out[i+2]=0; out[i+3]=255;}
+    }
+  }
+  return {data:out,w:outW,h:outH};
+}
+
+function detectCenteringRectified(d,w,h){
+  const LINES=9;
+  const maxDepth=Math.round(Math.min(w,h)*0.22);
+  const scan=(side)=>{
+    const medGrad=[];
+    for(let dep=2;dep<maxDepth-1;dep++){
+      const gs=[];
+      for(let li=0;li<LINES;li++){
+        const f=0.20+0.60*(li/(LINES-1));
+        if(side==='L'||side==='R'){
+          const y=Math.round(h*f);
+          const x=(side==='L')?dep:(w-1-dep);
+          const xm=CLAMP(x-1,0,w-1), xp=CLAMP(x+1,0,w-1);
+          const yy=CLAMP(y,0,h-1);
+          gs.push(Math.abs(LUM(...PX(d,w,xp,yy))-LUM(...PX(d,w,xm,yy))));
+        }else{
+          const x=Math.round(w*f);
+          const y=(side==='T')?dep:(h-1-dep);
+          const ym=CLAMP(y-1,0,h-1), yp=CLAMP(y+1,0,h-1);
+          const xx=CLAMP(x,0,w-1);
+          gs.push(Math.abs(LUM(...PX(d,w,xx,yp))-LUM(...PX(d,w,xx,ym))));
+        }
+      }
+      gs.sort((a,b)=>a-b);
+      medGrad[dep]=gs[Math.floor(gs.length/2)];
+    }
+    const vals=medGrad.filter(v=>typeof v==='number');
+    const mean=vals.reduce((s,v)=>s+v,0)/vals.length;
+    const std=Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length);
+    const med=vals.slice().sort((a,b)=>a-b)[Math.floor(vals.length/2)];
+    const thresh=Math.max(2, med*2.0, mean+std*1.5);
+    let hit=null;
+    for(let dep=2;dep<maxDepth-2;dep++){ if(medGrad[dep]>thresh){ hit=dep; break; } }
+    return hit||0;
+  };
+  const bL=scan('L'), bR=scan('R'), bT=scan('T'), bB=scan('B');
+  const lrT=bL+bR, tbT=bT+bB;
+  const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
+  const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
+  return {bL,bR,bT,bB,lrRatio,tbRatio,scanL:{width:bL,confidence:'low'},scanR:{width:bR,confidence:'low'},scanT:{width:bT,confidence:'low'},scanB:{width:bB,confidence:'low'},confidence:'low'};
+}
+
 function medianArr(arr) {
   const s=[...arr].sort((a,b)=>a-b);
   return s[Math.floor(s.length/2)];
@@ -468,8 +642,11 @@ async function analyzeCard(src) {
   const angleResult=detectCardAngle(d,w,h,bounds);
   const angle=angleResult.angle;
 
-  // Compute background color from image corners (same as findBounds uses)
-  // Pass to measureBorderWidth so it can precisely locate card edges
+  const lines=detectCardLines(d,w,h,bounds);
+  const corners=lines?computeCardCorners(lines):null;
+  let rect=null;
+  if(corners){ rect=warpPerspective(d,w,h,corners); }
+
   const PATCH=12;
   let bgR=0,bgG=0,bgB=0,bgN=0;
   for(const [cx,cy] of [[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]]){
@@ -480,8 +657,17 @@ async function analyzeCard(src) {
   }
   const bgColor={r:bgR/bgN, g:bgG/bgN, b:bgB/bgN};
 
-  const centering=detectCentering(d,w,h,bounds,angle,bgColor);
-  return{srcCanvas:canvas,imgUrl,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
+  let centering=detectCentering(d,w,h,bounds,angle,bgColor);
+  let rectUrl=null;
+  if(rect){
+    centering=detectCenteringRectified(rect.data,rect.w,rect.h);
+    const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
+    const ctx=c.getContext('2d');
+    const imgData=ctx.createImageData(rect.w,rect.h); imgData.data.set(rect.data); ctx.putImageData(imgData,0,0);
+    rectUrl=c.toDataURL('image/jpeg',0.92);
+  }
+
+  return{srcCanvas:canvas,imgUrl,rectUrl,rect,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
 }
 
 // ─── Card display with overlay ─────────────────────────────────────────────────
@@ -495,17 +681,10 @@ function CardDisplay({result, borderOverrides, outerOffsets, debug}){
     const img=imgRef.current;
     const draw=()=>{
       const cen=result.centering;
-      const bn=result.bounds;
       const bL=Math.max(0,(borderOverrides?.L??0)+cen.bL);
       const bR=Math.max(0,(borderOverrides?.R??0)+cen.bR);
       const bT=Math.max(0,(borderOverrides?.T??0)+cen.bT);
       const bB=Math.max(0,(borderOverrides?.B??0)+cen.bB);
-      // Apply outer offsets to bounds
-      const cl=bn.left+(outerOffsets?.L??0);
-      const cr=bn.right-(outerOffsets?.R??0);
-      const ct=bn.top+(outerOffsets?.T??0);
-      const cb=bn.bottom-(outerOffsets?.B??0);
-      const cW=cr-cl, cH=cb-ct;
 
       const w=img.naturalWidth||result.w;
       const h=img.naturalHeight||result.h;
@@ -513,36 +692,22 @@ function CardDisplay({result, borderOverrides, outerOffsets, debug}){
       const ctx=c.getContext('2d');
       ctx.clearRect(0,0,w,h);
 
-      const angle=result.angle;
-      const rad=angle*Math.PI/180;
-      const cosA=Math.cos(rad),sinA=Math.sin(rad);
+      const cl=(outerOffsets?.L??0);
+      const cr=w-(outerOffsets?.R??0);
+      const ct=(outerOffsets?.T??0);
+      const cb=h-(outerOffsets?.B??0);
+      const cW=cr-cl, cH=cb-ct;
 
-      // Rotate a point around card center
-      const cardCX=cl+cW/2, cardCY=ct+cH/2;
-      const rot=([x,y])=>{
-        const dx=x-cardCX,dy=y-cardCY;
-        return[cardCX+dx*cosA-dy*sinA, cardCY+dx*sinA+dy*cosA];
-      };
+      // Outer rect
+      ctx.strokeStyle='#ff9944'; ctx.lineWidth=3; ctx.setLineDash([]);
+      ctx.strokeRect(cl,ct,cW,cH);
 
-      // Draw outer card boundary (rotated orange box)
-      const outerCorners=[[cl,ct],[cr,ct],[cr,cb],[cl,cb]].map(([x,y])=>rot([x,y]));
-      ctx.beginPath();
-      ctx.moveTo(outerCorners[0][0],outerCorners[0][1]);
-      for(let i=1;i<4;i++) ctx.lineTo(outerCorners[i][0],outerCorners[i][1]);
-      ctx.closePath();
-      ctx.strokeStyle='#ff9944'; ctx.lineWidth=3; ctx.setLineDash([]); ctx.stroke();
-
-      // Draw inner artwork boundary (rotated green dashed box)
-      const il=cl+bL,ir=cr-bR,it=ct+bT,ib=cb-bB;
-      const innerCorners=[[il,it],[ir,it],[ir,ib],[il,ib]].map(([x,y])=>rot([x,y]));
-      ctx.beginPath();
-      ctx.moveTo(innerCorners[0][0],innerCorners[0][1]);
-      for(let i=1;i<4;i++) ctx.lineTo(innerCorners[i][0],innerCorners[i][1]);
-      ctx.closePath();
-      ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.setLineDash([10,5]); ctx.stroke();
+      // Inner rect
+      const il=cl+bL, ir=cr-bR, it=ct+bT, ib=cb-bB;
+      ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.setLineDash([10,5]);
+      ctx.strokeRect(il,it,Math.max(0,ir-il),Math.max(0,ib-it));
       ctx.setLineDash([]);
 
-      // Border labels positioned along rotated edges
       const fs=Math.max(13,~~(cW*0.024));
       ctx.font=`bold ${fs}px ${mono}`; ctx.textAlign='center';
       const lc=s=>s?.confidence==='good'?'#00ff88':s?.confidence==='low'?'#ccbb00':'#ff4444';
@@ -550,17 +715,11 @@ function CardDisplay({result, borderOverrides, outerOffsets, debug}){
         ctx.fillStyle='rgba(0,0,0,.75)'; ctx.fillRect(x-36,y-14,72,20);
         ctx.fillStyle=lc(conf); ctx.fillText(txt,x,y);
       };
-      const mid=(p0,p1)=>[(p0[0]+p1[0])/2,(p0[1]+p1[1])/2];
-      const tMid=mid(outerCorners[0],outerCorners[1]);
-      const bMid=mid(outerCorners[3],outerCorners[2]);
-      const lMid=mid(outerCorners[0],outerCorners[3]);
-      const rMid=mid(outerCorners[1],outerCorners[2]);
-      drawLabel(`T ${bT}px`,tMid[0],tMid[1]-12,cen.scanT);
-      drawLabel(`B ${bB}px`,bMid[0],bMid[1]+20,cen.scanB);
-      drawLabel(`L ${bL}px`,lMid[0]-42,lMid[1],cen.scanL);
-      drawLabel(`R ${bR}px`,rMid[0]+42,rMid[1],cen.scanR);
+      drawLabel(`T ${bT}px`, cl+cW/2, ct-12, cen.scanT);
+      drawLabel(`B ${bB}px`, cl+cW/2, cb+20, cen.scanB);
+      drawLabel(`L ${bL}px`, cl-32, ct+cH/2, cen.scanL);
+      drawLabel(`R ${bR}px`, cr+32, ct+cH/2, cen.scanR);
 
-      // Centering ratio badge above card
       const lrT=bL+bR,tbT=bT+bB;
       const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
       const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
@@ -568,23 +727,16 @@ function CardDisplay({result, borderOverrides, outerOffsets, debug}){
       const tbOk=Math.max(tbRatio,100-tbRatio)<=65;
       ctx.font=`bold ${Math.max(14,~~(cW*0.030))}px ${mono}`;
       ctx.fillStyle=(lrOk&&tbOk)?'#00ff88':'#ff6633';
-      ctx.fillText(
-        `${lrRatio}/${Math.round((100-lrRatio)*10)/10}  ${tbRatio}/${Math.round((100-tbRatio)*10)/10}`,
-        cardCX, ct-16
-      );
-      if(Math.abs(angle)>=0.1){
-        ctx.font=`${Math.max(11,~~(cW*0.02))}px ${mono}`;
-        ctx.fillStyle='#ff9944';
-        ctx.fillText(`${angle>0?'+':''}${angle}°`, cardCX, ct-2);
-      }
+      ctx.fillText(`${lrRatio}/${Math.round((100-lrRatio)*10)/10}  ${tbRatio}/${Math.round((100-tbRatio)*10)/10}`, cl+cW/2, ct-28);
     };
     if(img.complete&&img.naturalWidth)draw(); else img.onload=draw;
   },[result,borderOverrides,outerOffsets,debug]);
 
   if(!result)return null;
+  const src=result.rectUrl||result.imgUrl;
   return(
     <div style={{position:'relative',width:'100%'}}>
-      <img ref={imgRef} src={result.imgUrl} style={{width:'100%',display:'block',borderRadius:6}}/>
+      <img ref={imgRef} src={src} style={{width:'100%',display:'block',borderRadius:6}}/>
       <canvas ref={canvasRef} style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none'}}/>
     </div>
   );
