@@ -245,17 +245,30 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   }
 
   // Compute median border color (robust to outliers at corners)
-  const brR=medianArr(borderColorSamples.map(s=>s[0]));
-  const brG=medianArr(borderColorSamples.map(s=>s[1]));
-  const brB=medianArr(borderColorSamples.map(s=>s[2]));
-  const colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
+  let brR=medianArr(borderColorSamples.map(s=>s[0]));
+  let brG=medianArr(borderColorSamples.map(s=>s[1]));
+  let brB=medianArr(borderColorSamples.map(s=>s[2]));
+  let colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
+
+  // Recompute border color after filtering obvious outliers (glare/text)
+  let dists=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
+  const medDist=medianArr(dists);
+  const keep=borderColorSamples.filter(([r,g,b])=>colorDist(r,g,b)<=medDist*2.2);
+  if(keep.length>=Math.max(10, borderColorSamples.length*0.25)){
+    brR=medianArr(keep.map(s=>s[0]));
+    brG=medianArr(keep.map(s=>s[1]));
+    brB=medianArr(keep.map(s=>s[2]));
+    colorDist=(r,g,b)=>Math.sqrt((r-brR)**2+(g-brG)**2+(b-brB)**2);
+    dists=keep.map(([r,g,b])=>colorDist(r,g,b));
+  }
+
 
   // Adaptive threshold: 3x median within-border color distance
   // Adapts to solid blue border (low variance → tight threshold)
   // vs foil/holo border (high variance → looser threshold)
   const dists=borderColorSamples.map(([r,g,b])=>colorDist(r,g,b));
   const withinBorderDist=medianArr(dists);
-  const TOL=Math.max(22, withinBorderDist*3.0);
+  const TOL=Math.min(80, Math.max(18, withinBorderDist*2.5));
 
   // Phase 2: From each actual edge, scan inward until color diverges
   const measurements=[];
@@ -690,10 +703,10 @@ function CardPanel({label,side,onResult}){
           angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
           centering:{lrRatio,tbRatio,bL,bR,bT,bB},
           scanDetails:{
-            L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,color:c.scanL?.borderColor,tol:c.scanL?.tol},
-            R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,color:c.scanR?.borderColor,tol:c.scanR?.tol},
-            T:{w:c.scanT?.width,iqr:c.scanT?.iqr,conf:c.scanT?.confidence,color:c.scanT?.borderColor,tol:c.scanT?.tol},
-            B:{w:c.scanB?.width,iqr:c.scanB?.iqr,conf:c.scanB?.confidence,color:c.scanB?.borderColor,tol:c.scanB?.tol},
+            L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,mode:c.scanL?.mode,color:c.scanL?.borderColor,tol:c.scanL?.tol},
+            R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,mode:c.scanR?.mode,color:c.scanR?.borderColor,tol:c.scanR?.tol},
+            T:{w:c.scanT?.width,iqr:c.scanT?.iqr,conf:c.scanT?.confidence,mode:c.scanT?.mode,color:c.scanT?.borderColor,tol:c.scanT?.tol},
+            B:{w:c.scanB?.width,iqr:c.scanB?.iqr,conf:c.scanB?.confidence,mode:c.scanB?.mode,color:c.scanB?.borderColor,tol:c.scanB?.tol},
           },
           borderOverrides
         },null,2)}
