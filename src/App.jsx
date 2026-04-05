@@ -350,18 +350,89 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   };
 }
 
+
+function edgeBandWidth(d,w,h,bn,side){
+  const {left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
+  const L=(y,x)=>LUM(d[(y*w+x)*4],d[(y*w+x)*4+1],d[(y*w+x)*4+2]);
+  const LINES=9;
+  const maxDepth=Math.round(Math.min(cW,cH)*0.22);
+  const gradsMed=[];
+  for(let dep=2;dep<maxDepth-1;dep++){
+    const gs=[];
+    for(let li=0;li<LINES;li++){
+      const f=0.20+0.60*(li/(LINES-1));
+      let x,y;
+      if(side==='L'||side==='R'){
+        y=Math.round(ct+cH*f);
+        x=(side==='L') ? (cl+dep) : (cr-dep);
+        const xm=CLAMP(x-1,0,w-1), xp=CLAMP(x+1,0,w-1);
+        const yy=CLAMP(y,0,h-1);
+        gs.push(Math.abs(L(yy,xp)-L(yy,xm)));
+      }else{
+        x=Math.round(cl+cW*f);
+        y=(side==='T') ? (ct+dep) : (cb-dep);
+        const ym=CLAMP(y-1,0,h-1), yp=CLAMP(y+1,0,h-1);
+        const xx=CLAMP(x,0,w-1);
+        gs.push(Math.abs(L(yp,xx)-L(ym,xx)));
+      }
+    }
+    gs.sort((a,b)=>a-b);
+    gradsMed[dep]=gs[Math.floor(gs.length/2)];
+  }
+  const smooth=[];
+  for(let dep=2;dep<maxDepth-1;dep++){
+    const a=gradsMed[dep-1]||0,b=gradsMed[dep]||0,c=gradsMed[dep+1]||0;
+    smooth[dep]=(a+b+c)/3;
+  }
+  const vals=smooth.filter(v=>typeof v==='number');
+  if(vals.length<5) return {width:0,confidence:'failed',mode:'edgeband'};
+  const mean=vals.reduce((s,v)=>s+v,0)/vals.length;
+  const std=Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length);
+  const med=vals.slice().sort((a,b)=>a-b)[Math.floor(vals.length/2)];
+  const thresh=Math.max(2, med*2.0, mean+std*1.5);
+  let outer=null, inner=null;
+  for(let dep=2;dep<maxDepth-2;dep++) if(smooth[dep]>thresh){ outer=dep; break; }
+  if(outer!==null){
+    for(let dep=outer+3;dep<maxDepth-2;dep++) if(smooth[dep]>thresh){ inner=dep; break; }
+  }
+  if(inner===null){
+    let bestG=0,bestDep=null;
+    for(let dep=(outer||2)+3;dep<maxDepth-2;dep++) if(smooth[dep]>bestG){bestG=smooth[dep];bestDep=dep;}
+    if(bestDep!==null) inner=bestDep;
+  }
+  const sideDim=(side==='L'||side==='R')?cW:cH;
+  const minOk=Math.max(2,sideDim*0.01);
+  const maxOk=sideDim*0.18;
+  if(inner!==null && (inner<minOk || inner>maxOk)) inner=null;
+  return {width:inner||0,confidence:inner?'low':'failed',mode:'edgeband'};
+}
+
 function detectCentering(d, w, h, bn, angleDeg, bgColor) {
   const sT=measureBorderWidth(d,w,h,bn,'T',angleDeg,bgColor);
   const sB=measureBorderWidth(d,w,h,bn,'B',angleDeg,bgColor);
   const sL=measureBorderWidth(d,w,h,bn,'L',angleDeg,bgColor);
   const sR=measureBorderWidth(d,w,h,bn,'R',angleDeg,bgColor);
-  const bL=sL.width,bR=sR.width,bT=sT.width,bB=sB.width;
+
+  const eT=edgeBandWidth(d,w,h,bn,'T');
+  const eB=edgeBandWidth(d,w,h,bn,'B');
+  const eL=edgeBandWidth(d,w,h,bn,'L');
+  const eR=edgeBandWidth(d,w,h,bn,'R');
+
+  const pick=(s,e)=>{
+    if(s.confidence==='good') return s;
+    if(s.mode && s.mode.startsWith('grad') && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
+    if(s.iqr>20 && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
+    if(s.width===0 && e.width>0) return {...s,width:e.width,confidence:'low',mode:e.mode};
+    return s;
+  };
+  const sT2=pick(sT,eT), sB2=pick(sB,eB), sL2=pick(sL,eL), sR2=pick(sR,eR);
+  const bL=sL2.width,bR=sR2.width,bT=sT2.width,bB=sB2.width;
   const lrT=bL+bR,tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
   const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
-  const confs=[sL.confidence,sR.confidence,sT.confidence,sB.confidence];
+  const confs=[sL2.confidence,sR2.confidence,sT2.confidence,sB2.confidence];
   const conf=confs.every(c=>c==='good')?'good':confs.filter(c=>c==='failed').length>=2?'failed':'low';
-  return{bL,bR,bT,bB,lrRatio,tbRatio,scanL:sL,scanR:sR,scanT:sT,scanB:sB,confidence:conf};
+  return{bL,bR,bT,bB,lrRatio,tbRatio,scanL:sL2,scanR:sR2,scanT:sT2,scanB:sB2,confidence:conf};
 }
 
 // ─── Extract card as upright cropped canvas ───────────────────────────────────
