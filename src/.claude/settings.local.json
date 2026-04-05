@@ -8,7 +8,12 @@
       "WebFetch(domain:www.tcgrader.com)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:taggrading.com)",
+      "WebFetch(domain:rarecandy.com)",
+      "WebFetch(domain:figoca.com)",
+      "WebFetch(domain:tcfever.com)",
+      "WebFetch(domain:help.taggrading.com)"
     ]
   }
 }

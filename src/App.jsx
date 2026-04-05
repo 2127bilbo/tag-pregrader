@@ -716,63 +716,92 @@ function loadTrainingBounds(isHolo, imgW, imgH) {
 function computeGrade(frontDings, backDings, frontCenter, backCenter) {
   const allDings = [...frontDings, ...backDings];
   const totalDings = allDings.length;
-  
-  // Weighted severity: front defects count ~2x
+
+  // ═══════════════════════════════════════════
+  // TAG-ALIGNED SCORING (based on research)
+  // Key insight: "A card will not grade significantly higher
+  // than its lowest subgrade score" - TAG Help Center
+  // ═══════════════════════════════════════════
+
+  // Step 1: Calculate centering subgrade scores
+  // TAG Front centering thresholds: 51/49=Pristine, 55/45=Gem10, 60/40≈9, 65/35=8, 70/30=7, 75/25=6
+  // TAG Back centering thresholds (TCG): 52/48=Pristine, 65/35=Gem10, then more lenient
+  const fMaxOff = Math.max(Math.max(frontCenter.lrRatio,100-frontCenter.lrRatio), Math.max(frontCenter.tbRatio,100-frontCenter.tbRatio));
+  const bMaxOff = Math.max(Math.max(backCenter.lrRatio,100-backCenter.lrRatio), Math.max(backCenter.tbRatio,100-backCenter.tbRatio));
+
+  // Front centering → subgrade score
+  let frontCenterScore;
+  if (fMaxOff <= 51) frontCenterScore = 995;      // Pristine
+  else if (fMaxOff <= 55) frontCenterScore = 970; // Gem Mint 10
+  else if (fMaxOff <= 60) frontCenterScore = 920; // Mint 9
+  else if (fMaxOff <= 62.5) frontCenterScore = 875; // NM-MT+ 8.5
+  else if (fMaxOff <= 65) frontCenterScore = 825; // NM-MT 8
+  else if (fMaxOff <= 67.5) frontCenterScore = 775; // NM+ 7.5
+  else if (fMaxOff <= 70) frontCenterScore = 725; // NM 7
+  else if (fMaxOff <= 72.5) frontCenterScore = 675; // EX-MT+ 6.5
+  else if (fMaxOff <= 75) frontCenterScore = 625; // EX-MT 6
+  else if (fMaxOff <= 80) frontCenterScore = 525; // EX 5
+  else frontCenterScore = 400; // Below 5
+
+  // Back centering → subgrade score (more lenient for TCG)
+  let backCenterScore;
+  if (bMaxOff <= 52) backCenterScore = 995;       // Pristine
+  else if (bMaxOff <= 65) backCenterScore = 970;  // Gem Mint 10
+  else if (bMaxOff <= 75) backCenterScore = 920;  // Mint 9
+  else if (bMaxOff <= 85) backCenterScore = 825;  // NM-MT 8
+  else backCenterScore = 700; // Lower
+
+  // Step 2: Calculate condition subgrade (corners, edges, surface)
+  // Non-centering DINGS reduce condition score
+  let conditionScore = 990; // Start at near-perfect
+
+  for (const ding of allDings) {
+    if (ding.type === "CENTERING") continue; // Centering handled separately
+
+    const sideMultiplier = ding.side === "FRONT" ? 1.5 : 1.0;
+    let deduction = 0;
+
+    if (ding.type.includes("SURFACE")) {
+      // Surface defects: most impactful
+      deduction = 40 + (ding.severity || 1) * 15;
+    } else if (ding.type.includes("CORNER")) {
+      // Corner wear
+      deduction = 25 + (ding.severity || 1) * 10;
+    } else if (ding.type.includes("EDGE")) {
+      // Edge wear
+      deduction = 20 + (ding.severity || 1) * 8;
+    } else {
+      deduction = 20;
+    }
+
+    conditionScore -= deduction * sideMultiplier;
+  }
+  conditionScore = Math.max(300, conditionScore);
+
+  // Step 3: Final score = approximately the LOWEST subgrade
+  // TAG says: card won't grade significantly higher than lowest subgrade
+  const minSubgrade = Math.min(frontCenterScore, backCenterScore, conditionScore);
+
+  // Slight adjustment: if all subgrades are high but one is slightly low,
+  // average them with heavy weight on the minimum
+  const avgSubgrade = (frontCenterScore + backCenterScore + conditionScore) / 3;
+  const tagScore = Math.round(minSubgrade * 0.75 + avgSubgrade * 0.25);
+
+  // Calculate weighted score for display (legacy)
   let weightedScore = 0;
   for (const ding of allDings) {
-    const sideMultiplier = ding.side === "FRONT" ? 2.0 : 1.0;
-    let typeWeight = 1;
-    if (ding.type.includes("SURFACE")) typeWeight = 2.5;
-    else if (ding.type.includes("EDGE")) typeWeight = 1.5;
-    else if (ding.type.includes("CORNER")) typeWeight = 1.2;
-    else if (ding.type === "CENTERING") typeWeight = 1.8;
-    
-    weightedScore += ding.severity * sideMultiplier * typeWeight;
+    const sw = ding.side === "FRONT" ? 1.5 : 1.0;
+    weightedScore += (ding.severity || 1) * sw;
   }
-  
-  // Map weighted score to TAG 1000-point scale
-  // From calibration data:
-  // 0 weighted → 970 (Gem Mint 10)
-  // ~1.8 (centering ding) → 920 (Mint 9)
-  // ~7 (4 back dings) → 830 (NM-MT 8)
-  // ~18 (5 mixed dings with front surface) → 740 (NM 7)
-  // ~14 (4 dings with front surface) → 631 (EX-MT 6)
-  // ~22 (6 dings, front+back surface) → 540 (EX 5)
-  
-  // Score curve — anchored to 6 real TAG DIG reports:
-  // w=0    → 970 (Gem Mint 10)
-  // w≈1.8  → 913 (Mint 9, centering only)
-  // w≈5.4  → 825 (NM-MT 8, 4 back-only)
-  // w≈13.9 → 637 (EX-MT 6, 1 front surface + 3 back)
-  // w≈20   → 555 (EX 5, front+back surface + 4 back)
-  
-  let tagScore;
-  if (weightedScore === 0) {
-    const fMaxOff = Math.max(Math.max(frontCenter.lrRatio,100-frontCenter.lrRatio), Math.max(frontCenter.tbRatio,100-frontCenter.tbRatio));
-    const bMaxOff = Math.max(Math.max(backCenter.lrRatio,100-backCenter.lrRatio), Math.max(backCenter.tbRatio,100-backCenter.tbRatio));
-    if (fMaxOff <= 51 && bMaxOff <= 52) tagScore = 995;
-    else if (fMaxOff <= 53 && bMaxOff <= 55) tagScore = 975;
-    else tagScore = 960;
-  } else if (weightedScore <= 2) {
-    tagScore = Math.round(940 - weightedScore * 15);
-  } else if (weightedScore <= 6) {
-    tagScore = Math.round(910 - (weightedScore - 2) * 25);
-  } else if (weightedScore <= 14) {
-    tagScore = Math.round(810 - (weightedScore - 6) * 22);
-  } else if (weightedScore <= 22) {
-    tagScore = Math.round(634 - (weightedScore - 14) * 13);
-  } else if (weightedScore <= 32) {
-    tagScore = Math.round(530 - (weightedScore - 22) * 10);
-  } else {
-    tagScore = Math.max(300, Math.round(430 - (weightedScore - 32) * 7));
-  }
-  
+
   return {
     tagScore: Math.max(300, Math.min(1000, tagScore)),
     grade: getGrade(tagScore),
     totalDings,
     weightedScore: Math.round(weightedScore * 10) / 10,
     allDings,
+    // Subgrade breakdown for debugging
+    subgrades: { frontCenter: frontCenterScore, backCenter: backCenterScore, condition: conditionScore },
   };
 }
 
