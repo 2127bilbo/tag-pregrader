@@ -155,7 +155,7 @@ function medianArr(arr) {
   return s[Math.floor(s.length/2)];
 }
 
-function measureBorderWidth(d, w, h, bn, side, angleDeg) {
+function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   const{left:cl,right:cr,top:ct,bottom:cb,cardW:cW,cardH:cH}=bn;
   const rad=angleDeg*Math.PI/180;
   const cosA=Math.cos(rad),sinA=Math.sin(rad);
@@ -168,9 +168,13 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
 
   const SAMPLES=32;
   const MAX_BORDER=Math.round(Math.min(cW,cH)*0.22);
-  const EDGE_SEARCH=5; // ±5px only — just fine-tuning the detected bound.
-  // ±15 was too wide: for T/B edges it found Pokémon-text gradients 10-15px
-  // inside the card instead of the physical card edge, corrupting color sampling.
+
+  // Background color distance function — used to precisely find card edge
+  const bgDistFn = bgColor
+    ? (r,g,b)=>Math.sqrt((r-bgColor.r)**2+(g-bgColor.g)**2+(b-bgColor.b)**2)
+    : null;
+  // Threshold: pixel is "background-like" if within 40 units of bg color
+  const BG_TOL = 40;
 
   // Phase 1: Find actual card edges + sample border color
   const edgePositions=[];
@@ -181,24 +185,44 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
     const ex=edgeStartX+alongX*t;
     const ey=edgeStartY+alongY*t;
 
-    // Fine-tune the detected bound position (±EDGE_SEARCH px)
-    let outerX=ex,outerY=ey,bestGrad=0;
-    for(let dep=-EDGE_SEARCH;dep<=EDGE_SEARCH;dep++){
-      const px=ex+perpInX*dep,py=ey+perpInY*dep;
-      if(px<0||px>=w||py<0||py>=h)continue;
-      const g=Math.abs(
-        lumAt(d,w,h,px-perpInX*2,py-perpInY*2)-
-        lumAt(d,w,h,px+perpInX*2,py+perpInY*2)
-      );
-      if(g>bestGrad){bestGrad=g;outerX=px;outerY=py;}
-    }
-    edgePositions.push({x:outerX,y:outerY,foundGrad:bestGrad});
+    // Find precise card edge using background color:
+    // Start at detected bound, walk OUTWARD (away from card) up to 15px.
+    // First position that is clearly background tells us the true card edge.
+    // Then step back 1px to land on the card edge itself.
+    let trueEdgeX=ex, trueEdgeY=ey;
 
-    // Sample border color from dep 2-5 only — very close to the card edge.
-    // Deeper sampling (3-10) was hitting text/artwork on T/B edges, giving wrong color.
+    if(bgDistFn){
+      // Walk outward (negative perp direction = away from card interior)
+      for(let dep=0;dep>=-15;dep--){
+        const px=CLAMP(Math.round(ex+perpInX*dep),0,w-1);
+        const py=CLAMP(Math.round(ey+perpInY*dep),0,h-1);
+        const[r,g,b]=PX(d,w,px,py);
+        if(bgDistFn(r,g,b)<BG_TOL){
+          // This is background — card edge is 1px inward
+          trueEdgeX=ex+perpInX*(dep+1);
+          trueEdgeY=ey+perpInY*(dep+1);
+          break;
+        }
+      }
+      // Also walk inward a little in case bounds overshot into card interior
+      // and the above didn't find background
+    } else {
+      // No bg color — use gradient search (fallback)
+      let bestGrad=0;
+      for(let dep=-5;dep<=5;dep++){
+        const px=ex+perpInX*dep,py=ey+perpInY*dep;
+        if(px<0||px>=w||py<0||py>=h)continue;
+        const g=Math.abs(lumAt(d,w,h,px-perpInX*2,py-perpInY*2)-lumAt(d,w,h,px+perpInX*2,py+perpInY*2));
+        if(g>bestGrad){bestGrad=g;trueEdgeX=px;trueEdgeY=py;}
+      }
+    }
+
+    edgePositions.push({x:trueEdgeX,y:trueEdgeY});
+
+    // Sample border color from 2-5px inward from true card edge
     for(let dep=2;dep<=5;dep++){
-      const px=CLAMP(Math.round(outerX+perpInX*dep),0,w-1);
-      const py=CLAMP(Math.round(outerY+perpInY*dep),0,h-1);
+      const px=CLAMP(Math.round(trueEdgeX+perpInX*dep),0,w-1);
+      const py=CLAMP(Math.round(trueEdgeY+perpInY*dep),0,h-1);
       const [r,g,b]=PX(d,w,px,py);
       borderColorSamples.push([r,g,b]);
     }
@@ -249,11 +273,11 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
   };
 }
 
-function detectCentering(d, w, h, bn, angleDeg) {
-  const sT=measureBorderWidth(d,w,h,bn,'T',angleDeg);
-  const sB=measureBorderWidth(d,w,h,bn,'B',angleDeg);
-  const sL=measureBorderWidth(d,w,h,bn,'L',angleDeg);
-  const sR=measureBorderWidth(d,w,h,bn,'R',angleDeg);
+function detectCentering(d, w, h, bn, angleDeg, bgColor) {
+  const sT=measureBorderWidth(d,w,h,bn,'T',angleDeg,bgColor);
+  const sB=measureBorderWidth(d,w,h,bn,'B',angleDeg,bgColor);
+  const sL=measureBorderWidth(d,w,h,bn,'L',angleDeg,bgColor);
+  const sR=measureBorderWidth(d,w,h,bn,'R',angleDeg,bgColor);
   const bL=sL.width,bR=sR.width,bT=sT.width,bB=sB.width;
   const lrT=bL+bR,tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
@@ -287,7 +311,20 @@ async function analyzeCard(src) {
   const bounds=findBounds(d,w,h);
   const angleResult=detectCardAngle(d,w,h,bounds);
   const angle=angleResult.angle;
-  const centering=detectCentering(d,w,h,bounds,angle);
+
+  // Compute background color from image corners (same as findBounds uses)
+  // Pass to measureBorderWidth so it can precisely locate card edges
+  const PATCH=12;
+  let bgR=0,bgG=0,bgB=0,bgN=0;
+  for(const [cx,cy] of [[0,0],[w-PATCH,0],[0,h-PATCH],[w-PATCH,h-PATCH]]){
+    for(let dy=0;dy<PATCH;dy++) for(let dx=0;dx<PATCH;dx++){
+      const[r,g,b]=PX(d,w,CLAMP(cx+dx,0,w-1),CLAMP(cy+dy,0,h-1));
+      bgR+=r;bgG+=g;bgB+=b;bgN++;
+    }
+  }
+  const bgColor={r:bgR/bgN, g:bgG/bgN, b:bgB/bgN};
+
+  const centering=detectCentering(d,w,h,bounds,angle,bgColor);
   return{srcCanvas:canvas,imgUrl,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
 }
 
