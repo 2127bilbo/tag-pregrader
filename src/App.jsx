@@ -683,6 +683,7 @@ async function analyzeCard(src) {
 
   let centering=detectCentering(d,w,h,bounds,angle,bgColor);
   let rectUrl=null;
+  let centeringSource='orig';
   let rectAvg=null;
   if(rect){
     // Compute quick brightness check to reject bad warps
@@ -694,7 +695,15 @@ async function analyzeCard(src) {
     const avg = n?sum/(n*3):0;
     rectAvg=avg;
     if(avg>8){
-      centering=detectCenteringRectified(rect.data,rect.w,rect.h);
+      const rectCentering=detectCenteringRectified(rect.data,rect.w,rect.h);
+      const rectHasSignal=(rectCentering.bL+rectCentering.bR+rectCentering.bT+rectCentering.bB)>0;
+      if(rectHasSignal){
+        centering=rectCentering;
+        centeringSource='rect';
+      }else{
+        rect=null;
+        rectAvg=null;
+      }
       const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
       const ctx=c.getContext('2d');
       const imgData=ctx.createImageData(rect.w,rect.h); imgData.data.set(rect.data); ctx.putImageData(imgData,0,0);
@@ -704,7 +713,7 @@ async function analyzeCard(src) {
     }
   }
 
-  return{srcCanvas:canvas,imgUrl,rectUrl,rect,rectAvg,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
+  return{srcCanvas:canvas,imgUrl,rectUrl,rect,rectAvg,centeringSource,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
 }
 
 // ─── Card display with overlay ─────────────────────────────────────────────────
@@ -985,7 +994,7 @@ function CardPanel({label,side,onResult}){
           appliedAngle:activeAngle,
           angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
           centering:{lrRatio,tbRatio,bL,bR,bT,bB},
-          rectInfo:{used:!!result.rectUrl,rectSize:result.rect?{w:result.rect.w,h:result.rect.h}:null,rectAvg:result.rectAvg},
+          rectInfo:{used:!!result.rectUrl,rectSize:result.rect?{w:result.rect.w,h:result.rect.h}:null,rectAvg:result.rectAvg,source:result.centeringSource},
           scanDetails:{
             L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,mode:c.scanL?.mode,color:c.scanL?.borderColor,tol:c.scanL?.tol},
             R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,mode:c.scanR?.mode,color:c.scanR?.borderColor,tol:c.scanR?.tol},
