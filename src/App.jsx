@@ -661,11 +661,22 @@ async function analyzeCard(src) {
   let centering=detectCentering(d,w,h,bounds,angle,bgColor);
   let rectUrl=null;
   if(rect){
-    centering=detectCenteringRectified(rect.data,rect.w,rect.h);
-    const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
-    const ctx=c.getContext('2d');
-    const imgData=ctx.createImageData(rect.w,rect.h); imgData.data.set(rect.data); ctx.putImageData(imgData,0,0);
-    rectUrl=c.toDataURL('image/jpeg',0.92);
+    // Compute quick brightness check to reject bad warps
+    let sum=0, n=0;
+    for(let i=0;i<rect.data.length;i+=16){
+      sum += rect.data[i]+rect.data[i+1]+rect.data[i+2];
+      n++;
+    }
+    const avg = n?sum/(n*3):0;
+    if(avg>8){
+      centering=detectCenteringRectified(rect.data,rect.w,rect.h);
+      const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
+      const ctx=c.getContext('2d');
+      const imgData=ctx.createImageData(rect.w,rect.h); imgData.data.set(rect.data); ctx.putImageData(imgData,0,0);
+      rectUrl=c.toDataURL('image/jpeg',0.92);
+    }else{
+      rect=null;
+    }
   }
 
   return{srcCanvas:canvas,imgUrl,rectUrl,rect,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
