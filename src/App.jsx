@@ -307,9 +307,14 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
 
   if(measurements.length<4){
     if(gradMeasurements.length>=4){
-      gradMeasurements.sort((a,b)=>a-b);
-      const med=gradMeasurements[Math.floor(gradMeasurements.length/2)];
-      return{width:med,confidence:'low',iqr:999,borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL),rawValues:gradMeasurements,mode:'grad'};
+      const sideDim = (side==='L' || side==='R') ? cW : cH;
+      const minOk = Math.max(2, sideDim*0.01);
+      const maxOk = sideDim*0.18;
+      const filtered=gradMeasurements.filter(v=>v>=minOk && v<=maxOk);
+      const useArr = filtered.length>=3?filtered:gradMeasurements;
+      useArr.sort((a,b)=>a-b);
+      const med=useArr[Math.floor(useArr.length/2)];
+      return{width:med,confidence:'low',iqr:999,borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL),rawValues:useArr,mode:filtered.length>=3?'grad-range':'grad'};
     }
     return{width:0,confidence:'failed',iqr:999,borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL)};
   }
@@ -318,6 +323,17 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   const q1=measurements[Math.floor(measurements.length*0.25)];
   const q3=measurements[Math.floor(measurements.length*0.75)];
   const iqr=q3-q1;
+  const sideDim = (side==='L' || side==='R') ? cW : cH;
+  const minOk = Math.max(2, sideDim*0.01);
+  const maxOk = sideDim*0.18;
+  if((med<minOk || med>maxOk) && gradMeasurements.length>=4){
+    const filtered=gradMeasurements.filter(v=>v>=minOk && v<=maxOk);
+    if(filtered.length>=3){
+      filtered.sort((a,b)=>a-b);
+      const gmed=filtered[Math.floor(filtered.length/2)];
+      return{width:gmed,confidence:'low',iqr, borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},tol:Math.round(TOL),rawValues:filtered,mode:'grad-range'};
+    }
+  }
   if((iqr>24 || med>MAX_BORDER*0.7) && gradMeasurements.length>=4){
     gradMeasurements.sort((a,b)=>a-b);
     const gmed=gradMeasurements[Math.floor(gradMeasurements.length/2)];
