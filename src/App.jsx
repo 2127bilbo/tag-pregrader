@@ -582,6 +582,7 @@ function edgeBandWidth(d,w,h,bn,side){
 }
 
 function detectCentering(d, w, h, bn, angleDeg, bgColor) {
+  const {cardW:cW,cardH:cH}=bn;
   const sT=measureBorderWidth(d,w,h,bn,'T',angleDeg,bgColor);
   const sB=measureBorderWidth(d,w,h,bn,'B',angleDeg,bgColor);
   const sL=measureBorderWidth(d,w,h,bn,'L',angleDeg,bgColor);
