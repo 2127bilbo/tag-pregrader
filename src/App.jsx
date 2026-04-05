@@ -305,21 +305,24 @@ function warpPerspective(srcData,w,h,corners){
   const H=computeHomography(dstPts, srcPts); // map dst -> src
   if(!H) return null;
   const out=new Uint8ClampedArray(outW*outH*4);
+  let inBounds=0;
   for(let y=0;y<outH;y++){
     for(let x=0;x<outW;x++){
       const denom=H[6]*x+H[7]*y+H[8];
+      if(!isFinite(denom) || Math.abs(denom)<1e-6){ continue; }
       const sx=(H[0]*x+H[1]*y+H[2])/denom;
       const sy=(H[3]*x+H[4]*y+H[5])/denom;
       const i=(y*outW+x)*4;
-      if(sx>=0&&sx<w-1&&sy>=0&&sy<h-1){
-        const r=lumAt(srcData,w,h,sx,sy); // use lumAt for smoothness then map to rgb
+      if(isFinite(sx)&&isFinite(sy)&&sx>=0&&sx<w-1&&sy>=0&&sy<h-1){
+        inBounds++;
         const x0=Math.floor(sx), y0=Math.floor(sy);
         const [pr,pg,pb]=PX(srcData,w,x0,y0);
         out[i]=pr; out[i+1]=pg; out[i+2]=pb; out[i+3]=255;
       }else{out[i]=out[i+1]=out[i+2]=0; out[i+3]=255;}
     }
   }
-  return {data:out,w:outW,h:outH};
+  const coverage=inBounds/(outW*outH);
+  return {data:out,w:outW,h:outH,coverage};
 }
 
 function clampCorner(pt,w,h){
@@ -362,19 +365,35 @@ function detectCenteringRectified(d,w,h){
       medGrad[dep]=gs[Math.floor(gs.length/2)];
     }
     const vals=medGrad.filter(v=>typeof v==='number');
+    if(vals.length<5) return 0;
     const mean=vals.reduce((s,v)=>s+v,0)/vals.length;
     const std=Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length);
     const med=vals.slice().sort((a,b)=>a-b)[Math.floor(vals.length/2)];
-    const thresh=Math.max(2, med*2.0, mean+std*1.5);
+    const thresh=Math.max(1.5, med*1.6, mean+std*1.1);
+
+    const sideDim=(side==='L'||side==='R')?w:h;
+    const minOk=Math.max(2, sideDim*0.01);
+    const maxOk=sideDim*0.18;
+
     let hit=null;
-    for(let dep=2;dep<maxDepth-2;dep++){ if(medGrad[dep]>thresh){ hit=dep; break; } }
+    for(let dep=Math.round(minOk);dep<maxDepth-2;dep++){
+      if(medGrad[dep]>thresh){ hit=dep; break; }
+    }
+    if(hit===null){
+      let bestG=0,bestDep=null;
+      for(let dep=Math.round(minOk);dep<maxDepth-2;dep++){
+        if(medGrad[dep]>bestG){bestG=medGrad[dep];bestDep=dep;}
+      }
+      hit=bestDep;
+    }
+    if(hit!==null && hit>maxOk) hit=null;
     return hit||0;
   };
   const bL=scan('L'), bR=scan('R'), bT=scan('T'), bB=scan('B');
   const lrT=bL+bR, tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
   const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
-  return {bL,bR,bT,bB,lrRatio,tbRatio,scanL:{width:bL,confidence:'low'},scanR:{width:bR,confidence:'low'},scanT:{width:bT,confidence:'low'},scanB:{width:bB,confidence:'low'},confidence:'low'};
+  return {bL,bR,bT,bB,lrRatio,tbRatio,scanL:{width:bL,confidence:'low',mode:'rect'},scanR:{width:bR,confidence:'low',mode:'rect'},scanT:{width:bT,confidence:'low',mode:'rect'},scanB:{width:bB,confidence:'low',mode:'rect'},confidence:'low'};
 }
 
 function medianArr(arr) {
@@ -694,15 +713,15 @@ async function analyzeCard(src) {
     }
     const avg = n?sum/(n*3):0;
     rectAvg=avg;
-    if(avg>8){
+    if(avg>3 && (rect.coverage||0)>0.55){
       const rectCentering=detectCenteringRectified(rect.data,rect.w,rect.h);
       const rectHasSignal=(rectCentering.bL+rectCentering.bR+rectCentering.bT+rectCentering.bB)>0;
+      // Always create rectUrl for debugging when rect is valid
       if(rectHasSignal){
         centering=rectCentering;
         centeringSource='rect';
       }else{
-        rect=null;
-        rectAvg=null;
+        centeringSource='orig';
       }
       const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
       const ctx=c.getContext('2d');
@@ -994,7 +1013,7 @@ function CardPanel({label,side,onResult}){
           appliedAngle:activeAngle,
           angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
           centering:{lrRatio,tbRatio,bL,bR,bT,bB},
-          rectInfo:{used:!!result.rectUrl,rectSize:result.rect?{w:result.rect.w,h:result.rect.h}:null,rectAvg:result.rectAvg,source:result.centeringSource},
+          rectInfo:{used:!!result.rectUrl,rectSize:result.rect?{w:result.rect.w,h:result.rect.h}:null,rectAvg:result.rectAvg,coverage:result.rect?.coverage,source:result.centeringSource},
           scanDetails:{
             L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,mode:c.scanL?.mode,color:c.scanL?.borderColor,tol:c.scanL?.tol},
             R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,mode:c.scanR?.mode,color:c.scanR?.borderColor,tol:c.scanR?.tol},
