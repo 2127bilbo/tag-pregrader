@@ -498,10 +498,25 @@ function CardPanel({label, side, onResult}) {
       const centering=detectCentering(d,w,h,bounds,newAngle);
       const deskewed=deskewCanvas(srcCanvas,newAngle);
       const displayUrl=deskewed.toDataURL('image/jpeg',0.92);
-      const dc=deskewed.getContext('2d',{willReadFrequently:true});
-      const dd=dc.getImageData(0,0,deskewed.width,deskewed.height);
-      const deskewedBounds=findBounds(dd.data,deskewed.width,deskewed.height);
-      setResult(prev=>({...prev,displayUrl,dw:deskewed.width,dh:deskewed.height,centering,angle:newAngle,deskewedBounds}));
+      const dw=deskewed.width, dh=deskewed.height;
+      // Mathematical transform — same as analyzeCard. Re-running findBounds on the
+      // deskewed image fails because dark corner triangles break background detection.
+      const rad2=-newAngle*Math.PI/180;
+      const cosD=Math.cos(rad2), sinD=Math.sin(rad2);
+      const ocx=w/2, ocy=h/2, dcx=dw/2, dcy=dh/2;
+      const transformPt=(x,y)=>{const dx=x-ocx,dy=y-ocy;return[dcx+dx*cosD-dy*sinD,dcy+dx*sinD+dy*cosD];};
+      const{left:bl,right:br,top:bt,bottom:bb}=bounds;
+      const corners=[transformPt(bl,bt),transformPt(br,bt),transformPt(br,bb),transformPt(bl,bb)];
+      const dLeft=Math.round(Math.min(...corners.map(c=>c[0])));
+      const dRight=Math.round(Math.max(...corners.map(c=>c[0])));
+      const dTop=Math.round(Math.min(...corners.map(c=>c[1])));
+      const dBottom=Math.round(Math.max(...corners.map(c=>c[1])));
+      const deskewedBounds={
+        left:CLAMP(dLeft,0,dw-1), right:CLAMP(dRight,0,dw-1),
+        top:CLAMP(dTop,0,dh-1),   bottom:CLAMP(dBottom,0,dh-1),
+        cardW:dRight-dLeft, cardH:dBottom-dTop,
+      };
+      setResult(prev=>({...prev,displayUrl,dw,dh,centering,angle:newAngle,deskewedBounds}));
       setBorderOverrides({L:0,R:0,T:0,B:0});
     },100);
   },[result]);
@@ -607,12 +622,22 @@ function CardPanel({label, side, onResult}) {
         <div style={{fontFamily:mono,fontSize:8,color:'#555',marginBottom:8}}>
           Drag green handles = inner border · Drag orange handles = card edge
         </div>
-        {/* Debug dump */}
-        <details style={{marginTop:10}}>
-          <summary style={{fontFamily:mono,fontSize:8,color:'#444',cursor:'pointer',textTransform:'uppercase'}}>Debug data</summary>
+        {/* Debug dump — open by default so data is always accessible */}
+        <details open style={{marginTop:10}}>
+          <summary style={{fontFamily:mono,fontSize:8,color:'#444',cursor:'pointer',textTransform:'uppercase'}}>Debug data (tap to select all)</summary>
           <textarea readOnly onClick={e=>e.target.select()}
             value={JSON.stringify({bounds:{...result?.bounds,method:result?.bounds?.method},angle:result?.angle,angleSources:result?.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),centering:{lrRatio,tbRatio,bL,bR,bT,bB},scanDetails:{L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,color:c.scanL?.borderColor,tol:c.scanL?.tol},R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,color:c.scanR?.borderColor,tol:c.scanR?.tol},T:{w:c.scanT?.width,iqr:c.scanT?.iqr,conf:c.scanT?.confidence,color:c.scanT?.borderColor,tol:c.scanT?.tol},B:{w:c.scanB?.width,iqr:c.scanB?.iqr,conf:c.scanB?.confidence,color:c.scanB?.borderColor,tol:c.scanB?.tol}}},null,2)}
             style={{width:'100%',height:140,marginTop:6,background:'#060810',color:'#66aaff',border:'none',borderRadius:4,fontFamily:mono,fontSize:8,resize:'none',padding:6,boxSizing:'border-box'}}/>
+        </details>
+      </div>}
+      {/* Fallback debug when detection fails entirely — shows bounds + angle even with no centering */}
+      {result&&!c&&<div style={{background:'#0d0f13',borderRadius:10,border:'1px solid #ff443344',padding:12,marginTop:8}}>
+        <div style={{fontFamily:mono,fontSize:9,color:'#ff4444',marginBottom:6}}>⚠ Detection failed — bounds debug</div>
+        <details open>
+          <summary style={{fontFamily:mono,fontSize:8,color:'#444',cursor:'pointer',textTransform:'uppercase'}}>Debug data (tap to select all)</summary>
+          <textarea readOnly onClick={e=>e.target.select()}
+            value={JSON.stringify({bounds:{...result?.bounds,method:result?.bounds?.method},angle:result?.angle,angleSources:result?.angleResult?.allAngles?.map(a=>Math.round(a*100)/100)},null,2)}
+            style={{width:'100%',height:100,marginTop:6,background:'#060810',color:'#ff6644',border:'none',borderRadius:4,fontFamily:mono,fontSize:8,resize:'none',padding:6,boxSizing:'border-box'}}/>
         </details>
       </div>}
     </div>
