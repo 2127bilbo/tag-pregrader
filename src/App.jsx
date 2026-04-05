@@ -283,17 +283,16 @@ function extractCardCanvas(srcCanvas, bounds, angleDeg) {
 async function analyzeCard(src) {
   const{canvas,w,h,data}=await loadImg(src,1400);
   const d=data.data;
+  const imgUrl=canvas.toDataURL('image/jpeg',0.92);
   const bounds=findBounds(d,w,h);
   const angleResult=detectCardAngle(d,w,h,bounds);
   const angle=angleResult.angle;
   const centering=detectCentering(d,w,h,bounds,angle);
-  const cardCanvas=extractCardCanvas(canvas,bounds,angle);
-  const cardUrl=cardCanvas.toDataURL('image/jpeg',0.92);
-  return{srcCanvas:canvas,w,h,bounds,centering,angle,angleResult,cardUrl,cardW:bounds.cardW,cardH:bounds.cardH};
+  return{srcCanvas:canvas,imgUrl,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
 }
 
 // ─── Card display with overlay ─────────────────────────────────────────────────
-function CardDisplay({result, angleOverride, borderOverrides, debug, onCanvasReady}){
+function CardDisplay({result, borderOverrides, outerOffsets, debug}){
   const canvasRef=useRef(null);
   const imgRef=useRef(null);
 
@@ -303,52 +302,96 @@ function CardDisplay({result, angleOverride, borderOverrides, debug, onCanvasRea
     const img=imgRef.current;
     const draw=()=>{
       const cen=result.centering;
-      const bL=(borderOverrides?.L??0)+cen.bL;
-      const bR=(borderOverrides?.R??0)+cen.bR;
-      const bT=(borderOverrides?.T??0)+cen.bT;
-      const bB=(borderOverrides?.B??0)+cen.bB;
-      const lrT=bL+bR,tbT=bT+bB;
-      const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
-      const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
-      const w=img.naturalWidth||result.cardW;
-      const h=img.naturalHeight||result.cardH;
+      const bn=result.bounds;
+      const bL=Math.max(0,(borderOverrides?.L??0)+cen.bL);
+      const bR=Math.max(0,(borderOverrides?.R??0)+cen.bR);
+      const bT=Math.max(0,(borderOverrides?.T??0)+cen.bT);
+      const bB=Math.max(0,(borderOverrides?.B??0)+cen.bB);
+      // Apply outer offsets to bounds
+      const cl=bn.left+(outerOffsets?.L??0);
+      const cr=bn.right-(outerOffsets?.R??0);
+      const ct=bn.top+(outerOffsets?.T??0);
+      const cb=bn.bottom-(outerOffsets?.B??0);
+      const cW=cr-cl, cH=cb-ct;
+
+      const w=img.naturalWidth||result.w;
+      const h=img.naturalHeight||result.h;
       c.width=w; c.height=h;
       const ctx=c.getContext('2d');
       ctx.clearRect(0,0,w,h);
-      // Outer card boundary
-      ctx.strokeStyle='#ff9944';ctx.lineWidth=Math.max(2,w*0.004);ctx.setLineDash([]);
-      ctx.strokeRect(0,0,w,h);
-      // Inner artwork boundary
-      ctx.strokeStyle='#00ff88';ctx.lineWidth=Math.max(1.5,w*0.003);ctx.setLineDash([8,4]);
-      ctx.strokeRect(bL,bT,w-bL-bR,h-bT-bB);
-      ctx.setLineDash([]);
-      // Border dimension labels
-      const fs=Math.max(10,~~(w*0.028));
-      ctx.font=`bold ${fs}px ${mono}`;ctx.textAlign='center';
-      const lc=(s)=>s?.confidence==='good'?'#00ff88':s?.confidence==='low'?'#ccbb00':'#ff6633';
-      const label=(txt,x,y,conf)=>{
-        ctx.fillStyle='rgba(0,0,0,.75)';ctx.fillRect(x-36,y-13,72,18);
-        ctx.fillStyle=lc(conf);ctx.fillText(txt,x,y);
+
+      const angle=result.angle;
+      const rad=angle*Math.PI/180;
+      const cosA=Math.cos(rad),sinA=Math.sin(rad);
+
+      // Rotate a point around card center
+      const cardCX=cl+cW/2, cardCY=ct+cH/2;
+      const rot=([x,y])=>{
+        const dx=x-cardCX,dy=y-cardCY;
+        return[cardCX+dx*cosA-dy*sinA, cardCY+dx*sinA+dy*cosA];
       };
-      label(`L ${bL}px`,bL/2,h/2,result.centering.scanL);
-      label(`R ${bR}px`,w-bR/2,h/2,result.centering.scanR);
-      label(`T ${bT}px`,w/2,bT/2+6,result.centering.scanT);
-      label(`B ${bB}px`,w/2,h-bB/2,result.centering.scanB);
-      // Centering ratio
+
+      // Draw outer card boundary (rotated orange box)
+      const outerCorners=[[cl,ct],[cr,ct],[cr,cb],[cl,cb]].map(([x,y])=>rot([x,y]));
+      ctx.beginPath();
+      ctx.moveTo(outerCorners[0][0],outerCorners[0][1]);
+      for(let i=1;i<4;i++) ctx.lineTo(outerCorners[i][0],outerCorners[i][1]);
+      ctx.closePath();
+      ctx.strokeStyle='#ff9944'; ctx.lineWidth=3; ctx.setLineDash([]); ctx.stroke();
+
+      // Draw inner artwork boundary (rotated green dashed box)
+      const il=cl+bL,ir=cr-bR,it=ct+bT,ib=cb-bB;
+      const innerCorners=[[il,it],[ir,it],[ir,ib],[il,ib]].map(([x,y])=>rot([x,y]));
+      ctx.beginPath();
+      ctx.moveTo(innerCorners[0][0],innerCorners[0][1]);
+      for(let i=1;i<4;i++) ctx.lineTo(innerCorners[i][0],innerCorners[i][1]);
+      ctx.closePath();
+      ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.setLineDash([10,5]); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Border labels positioned along rotated edges
+      const fs=Math.max(13,~~(cW*0.024));
+      ctx.font=`bold ${fs}px ${mono}`; ctx.textAlign='center';
+      const lc=s=>s?.confidence==='good'?'#00ff88':s?.confidence==='low'?'#ccbb00':'#ff4444';
+      const drawLabel=(txt,x,y,conf)=>{
+        ctx.fillStyle='rgba(0,0,0,.75)'; ctx.fillRect(x-36,y-14,72,20);
+        ctx.fillStyle=lc(conf); ctx.fillText(txt,x,y);
+      };
+      const mid=(p0,p1)=>[(p0[0]+p1[0])/2,(p0[1]+p1[1])/2];
+      const tMid=mid(outerCorners[0],outerCorners[1]);
+      const bMid=mid(outerCorners[3],outerCorners[2]);
+      const lMid=mid(outerCorners[0],outerCorners[3]);
+      const rMid=mid(outerCorners[1],outerCorners[2]);
+      drawLabel(`T ${bT}px`,tMid[0],tMid[1]-12,cen.scanT);
+      drawLabel(`B ${bB}px`,bMid[0],bMid[1]+20,cen.scanB);
+      drawLabel(`L ${bL}px`,lMid[0]-42,lMid[1],cen.scanL);
+      drawLabel(`R ${bR}px`,rMid[0]+42,rMid[1],cen.scanR);
+
+      // Centering ratio badge above card
+      const lrT=bL+bR,tbT=bT+bB;
+      const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
+      const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
       const lrOk=Math.max(lrRatio,100-lrRatio)<=55;
       const tbOk=Math.max(tbRatio,100-tbRatio)<=65;
-      ctx.font=`bold ${Math.max(12,~~(w*0.032))}px ${mono}`;
+      ctx.font=`bold ${Math.max(14,~~(cW*0.030))}px ${mono}`;
       ctx.fillStyle=(lrOk&&tbOk)?'#00ff88':'#ff6633';
-      ctx.fillText(`${lrRatio}/${Math.round((100-lrRatio)*10)/10}  ${tbRatio}/${Math.round((100-tbRatio)*10)/10}`,w/2,18);
-      if(onCanvasReady)onCanvasReady({lrRatio,tbRatio,bL,bR,bT,bB});
+      ctx.fillText(
+        `${lrRatio}/${Math.round((100-lrRatio)*10)/10}  ${tbRatio}/${Math.round((100-tbRatio)*10)/10}`,
+        cardCX, ct-16
+      );
+      if(Math.abs(angle)>=0.1){
+        ctx.font=`${Math.max(11,~~(cW*0.02))}px ${mono}`;
+        ctx.fillStyle='#ff9944';
+        ctx.fillText(`${angle>0?'+':''}${angle}°`, cardCX, ct-2);
+      }
     };
-    if(img.complete&&img.naturalWidth)draw();else img.onload=draw;
-  },[result,angleOverride,borderOverrides,debug]);
+    if(img.complete&&img.naturalWidth)draw(); else img.onload=draw;
+  },[result,borderOverrides,outerOffsets,debug]);
 
   if(!result)return null;
   return(
     <div style={{position:'relative',width:'100%'}}>
-      <img ref={imgRef} src={result.cardUrl} style={{width:'100%',display:'block',borderRadius:6}}/>
+      <img ref={imgRef} src={result.imgUrl} style={{width:'100%',display:'block',borderRadius:6}}/>
       <canvas ref={canvasRef} style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none'}}/>
     </div>
   );
@@ -478,50 +521,34 @@ function CardPanel({label,side,onResult}){
                    style={{width:'100%',accentColor:'#ff9944'}}/>
                </div>}
 
-               {/* Cropped upright card — constrained height so it doesn't fill screen */}
-               {result&&<div style={{position:'relative',maxHeight:'60vh',overflow:'hidden',borderRadius:6,display:'flex',justifyContent:'center'}}>
-                 <div style={{position:'relative',maxHeight:'60vh',width:'100%'}}>
-                 <CardDisplay result={result} angleOverride={activeAngle} borderOverrides={borderOverrides} debug={debug}/>
-
-                 {/* INNER border nudge arrows (green dashed box) */}
-                 {/* Top */}
-                 <div style={{position:'absolute',top:Math.max(2,bT-14),left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
-                   <button onClick={()=>nudgeBorder('T',-1)} style={arrowBtn} title="Inner border up">▲</button>
-                   <button onClick={()=>nudgeBorder('T',1)}  style={arrowBtn} title="Inner border down">▼</button>
-                 </div>
-                 {/* Bottom */}
-                 <div style={{position:'absolute',bottom:Math.max(2,bB-14),left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
-                   <button onClick={()=>nudgeBorder('B',1)}  style={arrowBtn} title="Inner border up">▲</button>
-                   <button onClick={()=>nudgeBorder('B',-1)} style={arrowBtn} title="Inner border down">▼</button>
-                 </div>
-                 {/* Left */}
-                 <div style={{position:'absolute',left:Math.max(2,bL-14),top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
+               {/* Full photo with rotated overlay — no crop until detection is solid */}
+               {result&&<div style={{position:'relative'}}>
+                 <CardDisplay result={result} borderOverrides={borderOverrides} outerOffsets={outerOffsets} debug={debug}/>
+                 {/* Inner border nudge arrows (green) */}
+                 <div style={{position:'absolute',top:'30%',left:4,display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
                    <button onClick={()=>nudgeBorder('L',-1)} style={arrowBtn}>◀</button>
                    <button onClick={()=>nudgeBorder('L',1)}  style={arrowBtn}>▶</button>
                  </div>
-                 {/* Right */}
-                 <div style={{position:'absolute',right:Math.max(2,bR-14),top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
+                 <div style={{position:'absolute',top:'30%',right:4,display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
                    <button onClick={()=>nudgeBorder('R',1)}  style={arrowBtn}>◀</button>
                    <button onClick={()=>nudgeBorder('R',-1)} style={arrowBtn}>▶</button>
                  </div>
-
-                 {/* OUTER boundary nudge arrows (orange box) — small, at card edges */}
-                 <div style={{position:'absolute',top:2,left:'50%',transform:'translateX(-50%)',display:'flex',gap:1,zIndex:10}}>
-                   <button onClick={()=>nudgeOuter('T',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card top edge in">▼</button>
-                   <button onClick={()=>nudgeOuter('T',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card top edge out">▲</button>
+                 <div style={{position:'absolute',bottom:28,left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
+                   <button onClick={()=>nudgeBorder('T',-1)} style={arrowBtn}>▲T</button>
+                   <button onClick={()=>nudgeBorder('T',1)}  style={arrowBtn}>▼T</button>
+                   <button onClick={()=>nudgeBorder('B',1)}  style={arrowBtn}>▲B</button>
+                   <button onClick={()=>nudgeBorder('B',-1)} style={arrowBtn}>▼B</button>
                  </div>
-                 <div style={{position:'absolute',bottom:2,left:'50%',transform:'translateX(-50%)',display:'flex',gap:1,zIndex:10}}>
-                   <button onClick={()=>nudgeOuter('B',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card bottom edge in">▲</button>
-                   <button onClick={()=>nudgeOuter('B',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card bottom edge out">▼</button>
-                 </div>
-                 <div style={{position:'absolute',left:2,top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:1,zIndex:10}}>
-                   <button onClick={()=>nudgeOuter('L',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card left edge in">▶</button>
-                   <button onClick={()=>nudgeOuter('L',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card left edge out">◀</button>
-                 </div>
-                 <div style={{position:'absolute',right:2,top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:1,zIndex:10}}>
-                   <button onClick={()=>nudgeOuter('R',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card right edge in">◀</button>
-                   <button onClick={()=>nudgeOuter('R',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card right edge out">▶</button>
-                 </div>
+                 {/* Outer boundary nudge arrows (orange) */}
+                 <div style={{position:'absolute',bottom:4,left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
+                   <button onClick={()=>nudgeOuter('L',1)}  style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>◀L</button>
+                   <button onClick={()=>nudgeOuter('L',-1)} style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▶L</button>
+                   <button onClick={()=>nudgeOuter('R',1)}  style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▶R</button>
+                   <button onClick={()=>nudgeOuter('R',-1)} style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>◀R</button>
+                   <button onClick={()=>nudgeOuter('T',1)}  style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▼T</button>
+                   <button onClick={()=>nudgeOuter('T',-1)} style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▲T</button>
+                   <button onClick={()=>nudgeOuter('B',1)}  style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▲B</button>
+                   <button onClick={()=>nudgeOuter('B',-1)} style={{...arrowBtn,background:'rgba(255,120,0,.7)',fontSize:8}}>▼B</button>
                  </div>
                </div>}
              </div>
