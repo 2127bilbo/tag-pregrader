@@ -31,83 +31,6 @@ const PX=(d,w,x,y)=>{const i=(y*w+x)*4;return[d[i],d[i+1],d[i+2]];};
 const LUM=(r,g,b)=>.299*r+.587*g+.114*b;
 
 /* ═══════════════════════════════════════════
-   CENTERINGCHECK.COM API INTEGRATION
-   Fallback for when local detection fails.
-   Uses Vercel serverless proxy at /api/centeringcheck
-   ═══════════════════════════════════════════ */
-// Compress image for API upload (Vercel has ~4.5MB limit)
-async function compressImageForAPI(imageBase64, maxWidth = 1200, quality = 0.80) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      let w = img.width, h = img.height;
-      if (w > maxWidth) {
-        h = Math.round(h * (maxWidth / w));
-        w = maxWidth;
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL('image/jpeg', quality));
-    };
-    img.src = imageBase64;
-  });
-}
-
-async function callCenteringCheckAPI(imageBase64) {
-  try {
-    // Compress image to stay under Vercel's 4.5MB limit
-    const compressed = await compressImageForAPI(imageBase64, 1200, 0.80);
-    console.log('CenteringCheck: Original', Math.round(imageBase64.length/1024), 'KB → Compressed', Math.round(compressed.length/1024), 'KB');
-
-    const response = await fetch('/api/centeringcheck', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: compressed, warp: true }),
-    });
-    if (!response.ok) {
-      const errText = await response.text();
-      console.warn('CenteringCheck API failed:', response.status, errText);
-      return null;
-    }
-    return await response.json();
-  } catch (err) {
-    console.warn('CenteringCheck API error:', err);
-    return null;
-  }
-}
-
-// Convert CenteringCheck response to our centering format
-// Their format: borders: { left: [outer, inner], right: [outer, inner], ... }
-// Our format: { borderL, borderR, borderT, borderB, lrRatio, tbRatio }
-function convertCenteringCheckResponse(apiResponse, imgW, imgH) {
-  if (!apiResponse?.borders || !apiResponse?.centeringValues) return null;
-  const { borders, centeringValues } = apiResponse;
-
-  // Calculate border widths from their [outer, inner] format
-  const borderL = Math.round(borders.left[1] - borders.left[0]);
-  const borderR = Math.round(borders.right[0] - borders.right[1]);
-  const borderT = Math.round(borders.top[1] - borders.top[0]);
-  const borderB = Math.round(borders.bottom[0] - borders.bottom[1]);
-
-  // Their centeringValues are decimals (0.375 = 37.5%), convert to our format
-  const lrRatio = Math.round(centeringValues.LR * 1000) / 10;
-  const tbRatio = Math.round(centeringValues.TB * 1000) / 10;
-
-  return {
-    borderL: Math.max(0, borderL),
-    borderR: Math.max(0, borderR),
-    borderT: Math.max(0, borderT),
-    borderB: Math.max(0, borderB),
-    lrRatio,
-    tbRatio,
-    source: 'centeringcheck', // Flag to indicate external API was used
-  };
-}
-
-/* ═══════════════════════════════════════════
    CARD DETECTION v2.6 — Grid-variance method
    Works on white, black, orange, any background,
    close-up or pulled back.
@@ -884,45 +807,14 @@ function cropReg(src,rg,mx=300){return new Promise(r=>{const img=new Image();img
 /* ═══════════════════════════════════════════
    FULL ANALYSIS PIPELINE
    ═══════════════════════════════════════════ */
-async function analyzeCardFull(src, side, overrideBounds = null, overrideCentering = null, useCenteringCheck = false) {
+async function analyzeCardFull(src, side, overrideBounds = null, overrideCentering = null) {
   const { w, h, data, canvas } = await loadImg(src);
   const d = data.data;
   const scaledImgUrl = canvas.toDataURL('image/jpeg', 0.92);
   const bounds = overrideBounds
     ? { ...overrideBounds, cardW: overrideBounds.right - overrideBounds.left, cardH: overrideBounds.bottom - overrideBounds.top }
     : findBounds(d, w, h);
-
-  // Centering detection with CenteringCheck.com fallback
-  let centering = overrideCentering;
-  let centeringSource = 'override';
-
-  if (!centering) {
-    // First try local detection
-    centering = analyzeCentering(d, w, h, bounds);
-    centeringSource = 'local';
-
-    // Check if local detection likely failed (50/50 default or very symmetric which is suspicious)
-    const localFailed = centering.lrRatio === 50 && centering.tbRatio === 50;
-    const suspiciouslyPerfect = Math.abs(centering.lrRatio - 50) < 2 && Math.abs(centering.tbRatio - 50) < 2;
-
-    // Use CenteringCheck API if: explicitly requested OR local detection failed
-    if (useCenteringCheck || localFailed) {
-      console.log(`[${side}] Trying CenteringCheck API (reason: ${useCenteringCheck ? 'user requested' : 'local detection failed'})`);
-      const apiResponse = await callCenteringCheckAPI(src);
-      if (apiResponse) {
-        const apiCentering = convertCenteringCheckResponse(apiResponse, w, h);
-        if (apiCentering) {
-          centering = apiCentering;
-          centeringSource = 'centeringcheck';
-          console.log(`[${side}] CenteringCheck result: ${centering.lrRatio}/${100-centering.lrRatio} LR, ${centering.tbRatio}/${100-centering.tbRatio} TB`);
-        }
-      }
-    }
-  }
-
-  // Add source info to centering object
-  centering.source = centeringSource;
-
+  const centering = overrideCentering || analyzeCentering(d, w, h, bounds);
   const centerDings = checkCenteringDings(centering, side);
   const corners = detectCornerDings(d, w, h, bounds, side);
   const edges = detectEdgeDings(d, w, h, bounds, side);
@@ -1999,40 +1891,6 @@ export default function TAGPreGrader(){
           <MeasurementOverlay image={fI} result={fR} label="Front — Detection Overlay"/>
           <MeasurementOverlay image={bI} result={bR} label="Back — Detection Overlay"/>
 
-          {/* CenteringCheck API buttons */}
-          <div style={{marginBottom:14,padding:12,background:"#0a0c10",borderRadius:8,border:"1px solid #1a1c22"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <span style={{fontFamily:mono,fontSize:9,color:"#666",textTransform:"uppercase"}}>CenteringCheck.com API</span>
-              <span style={{fontFamily:mono,fontSize:8,color:"#444"}}>Perspective-corrected detection</span>
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              {[["front","Front",fR,fI,setFR],["back","Back",bR,bI,setBR]].map(([side,label,result,img,setResult])=>(
-                <button key={side}
-                  onClick={async()=>{
-                    if(!img)return;
-                    const newResult = await analyzeCardFull(img, side, null, null, true);
-                    setResult(newResult);
-                    const newFR = side==='front' ? newResult : fR;
-                    const newBR = side==='back' ? newResult : bR;
-                    const grade = computeGrade(newFR.allDings, newBR.allDings, newFR.centering, newBR.centering);
-                    setGradeResult(grade);
-                  }}
-                  style={{flex:1,padding:"8px 0",borderRadius:6,
-                    border:`1px solid ${result?.centering?.source==='centeringcheck'?"#00ff88":"#0088ff"}55`,
-                    background:result?.centering?.source==='centeringcheck'?"rgba(0,255,136,.08)":"rgba(0,136,255,.08)",
-                    color:result?.centering?.source==='centeringcheck'?"#00ff88":"#0088ff",
-                    fontFamily:mono,fontSize:9,cursor:"pointer",textTransform:"uppercase"}}>
-                  {result?.centering?.source==='centeringcheck'?"✓ Using API":"⟳ Use API"} {label}
-                </button>
-              ))}
-            </div>
-            {(fR?.centering?.source==='centeringcheck'||bR?.centering?.source==='centeringcheck')&&(
-              <div style={{marginTop:8,fontFamily:mono,fontSize:8,color:"#00ff88"}}>
-                ✓ Using CenteringCheck.com perspective warp for: {[fR?.centering?.source==='centeringcheck'&&'Front',bR?.centering?.source==='centeringcheck'&&'Back'].filter(Boolean).join(', ')}
-              </div>
-            )}
-          </div>
-
           {/* Manual Adjust toggle buttons */}
           <div style={{display:"flex",gap:8,marginBottom:14}}>
             {[["front","Front",fR,fI],["back","Back",bR,bI]].map(([s,sl,r,img])=>(
@@ -2060,13 +1918,9 @@ export default function TAGPreGrader(){
           {[["Front",fR],["Back",bR]].map(([s,r])=>{
             const maxOff=Math.max(Math.max(r.centering.lrRatio,100-r.centering.lrRatio),Math.max(r.centering.tbRatio,100-r.centering.tbRatio));
             const hasDing=r.centerDings.length>0;
-            const isFromAPI = r.centering.source === 'centeringcheck';
-            return(<div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${hasDing?"#ff663344":isFromAPI?"#00ff8833":"#1a1c22"}`}}>
+            return(<div key={s} style={{marginBottom:16,padding:14,background:"#0d0f13",borderRadius:10,border:`1px solid ${hasDing?"#ff663344":"#1a1c22"}`}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
-                  {isFromAPI&&<span style={{fontFamily:mono,fontSize:8,color:"#00ff88",background:"rgba(0,255,136,.1)",padding:"2px 6px",borderRadius:3}}>API</span>}
-                </div>
+                <span style={{fontFamily:mono,fontSize:11,color:"#888",textTransform:"uppercase"}}>{s}</span>
                 {hasDing&&<span style={{fontFamily:mono,fontSize:10,color:"#ff6633",fontWeight:600}}>⚠ DING</span>}
               </div>
               <div style={{display:"flex",gap:16}}>
@@ -2076,7 +1930,6 @@ export default function TAGPreGrader(){
               </div>
               <div style={{marginTop:8,fontFamily:mono,fontSize:9,color:"#555"}}>
                 Worst axis: {maxOff.toFixed(1)}/{(100-maxOff).toFixed(1)} · Threshold: {s==="Front"?"55/45":"65/35"}
-                {isFromAPI&&<span style={{color:"#00ff88"}}> · Perspective-corrected</span>}
               </div>
             </div>);
           })}
