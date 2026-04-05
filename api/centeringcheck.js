@@ -2,6 +2,8 @@
  * Vercel Serverless Proxy for CenteringCheck.com API
  */
 
+const https = require('https');
+
 module.exports = async function handler(req, res) {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -28,37 +30,64 @@ module.exports = async function handler(req, res) {
 
     console.log('Proxying to CenteringCheck, image length:', image.length);
 
-    // Forward request to CenteringCheck API with spoofed headers
-    const response = await fetch('https://www.centeringcheck.com/api/upload', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Origin': 'https://www.centeringcheck.com',
-        'Referer': 'https://www.centeringcheck.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      },
-      body: JSON.stringify({ image, warp }),
+    // Use https module instead of fetch for better Node.js compatibility
+    const postData = JSON.stringify({ image, warp });
+
+    const result = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'www.centeringcheck.com',
+        port: 443,
+        path: '/api/upload',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+          'Origin': 'https://www.centeringcheck.com',
+          'Referer': 'https://www.centeringcheck.com/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      };
+
+      const request = https.request(options, (response) => {
+        let data = '';
+        response.on('data', (chunk) => { data += chunk; });
+        response.on('end', () => {
+          console.log('CenteringCheck response status:', response.statusCode);
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            try {
+              resolve({ ok: true, data: JSON.parse(data) });
+            } catch (e) {
+              reject(new Error('Failed to parse response: ' + data.substring(0, 200)));
+            }
+          } else {
+            resolve({ ok: false, status: response.statusCode, data: data.substring(0, 500) });
+          }
+        });
+      });
+
+      request.on('error', (e) => {
+        console.error('Request error:', e.message);
+        reject(e);
+      });
+
+      request.write(postData);
+      request.end();
     });
 
-    console.log('CenteringCheck response status:', response.status);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('CenteringCheck API error:', response.status, errorText);
-      return res.status(response.status).json({
+    if (!result.ok) {
+      console.error('CenteringCheck API error:', result.status, result.data);
+      return res.status(result.status || 502).json({
         error: 'CenteringCheck API error',
-        status: response.status,
-        details: errorText.substring(0, 500)
+        status: result.status,
+        details: result.data
       });
     }
 
-    const data = await response.json();
-    console.log('CenteringCheck success, got borders:', !!data.borders);
-
-    return res.status(200).json(data);
+    console.log('CenteringCheck success, got borders:', !!result.data.borders);
+    return res.status(200).json(result.data);
 
   } catch (error) {
-    console.error('Proxy error:', error);
+    console.error('Proxy error:', error.message);
     return res.status(500).json({
       error: 'Proxy request failed',
       message: error.message
@@ -66,7 +95,6 @@ module.exports = async function handler(req, res) {
   }
 };
 
-// Vercel config - increase body size limit for base64 images
 module.exports.config = {
   api: {
     bodyParser: {
