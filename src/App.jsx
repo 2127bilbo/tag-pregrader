@@ -391,8 +391,7 @@ function detectCornerDings(d, w, h, bn, side) {
     const wearThresh  = isHolo ? 0.20 : 0.10;
     const sharpThresh = isHolo ? 2    : 4;
 
-    const hasWear = !suppressAll
-      && !c.isUniformBright
+    const hasWear = !c.isUniformBright
       && (c.effectiveWear > wearThresh || c.avgSharp < sharpThresh);
 
     if(hasWear){
