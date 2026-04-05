@@ -272,20 +272,40 @@ async function analyzeCard(src) {
   // Deskew for display — rotate card upright so user sees a straight card
   const deskewed=deskewCanvas(canvas,angle);
   const displayUrl=deskewed.toDataURL('image/jpeg',0.92);
-  // Also keep original for overlay drawing on deskewed image
-  // Recompute bounds on deskewed image for accurate overlay placement
-  const dc=deskewed.getContext('2d',{willReadFrequently:true});
-  const dd=dc.getImageData(0,0,deskewed.width,deskewed.height);
-  const deskewedBounds=findBounds(dd.data,deskewed.width,deskewed.height);
+  const dw=deskewed.width, dh=deskewed.height;
+
+  // Transform original bounds into deskewed coordinate space mathematically.
+  // Re-running findBounds on the deskewed image fails because rotation creates
+  // dark corner triangles that confuse the background-color detector.
+  const rad2=-angle*Math.PI/180; // negated because deskew rotates by -angle
+  const cosD=Math.cos(rad2), sinD=Math.sin(rad2);
+  // Original image center (rotation pivot for deskew)
+  const ocx=w/2, ocy=h/2;
+  // Deskewed image center
+  const dcx=dw/2, dcy=dh/2;
+  // Transform a point from original to deskewed space
+  const transformPt=(x,y)=>{
+    const dx=x-ocx, dy=y-ocy;
+    return[dcx+dx*cosD-dy*sinD, dcy+dx*sinD+dy*cosD];
+  };
+  // Transform all 4 corners of original bounds
+  const{left:bl,right:br,top:bt,bottom:bb}=bounds;
+  const corners=[transformPt(bl,bt),transformPt(br,bt),transformPt(br,bb),transformPt(bl,bb)];
+  const dLeft  =Math.round(Math.min(...corners.map(c=>c[0])));
+  const dRight =Math.round(Math.max(...corners.map(c=>c[0])));
+  const dTop   =Math.round(Math.min(...corners.map(c=>c[1])));
+  const dBottom=Math.round(Math.max(...corners.map(c=>c[1])));
+  const deskewedBounds={
+    left:CLAMP(dLeft,0,dw-1), right:CLAMP(dRight,0,dw-1),
+    top:CLAMP(dTop,0,dh-1),   bottom:CLAMP(dBottom,0,dh-1),
+    cardW:dRight-dLeft, cardH:dBottom-dTop,
+  };
 
   return{
     srcCanvas:canvas, displayUrl,
-    w, h,
-    dw:deskewed.width, dh:deskewed.height,
-    bounds,          // original image bounds (for reference)
-    deskewedBounds,  // bounds on the deskewed image (for overlay)
-    centering,
-    angle, angleResult,
+    w, h, dw, dh,
+    bounds, deskewedBounds,
+    centering, angle, angleResult,
   };
 }
 
@@ -420,15 +440,50 @@ function CardPanel({label, side, onResult}) {
         <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:'none'}}/>
       </div>
 
-      {/* Image + overlay */}
+      {/* Image + overlay + on-image nudge arrows */}
       <div style={{position:'relative',background:'#0a0a0a',borderRadius:10,overflow:'hidden',border:'1px solid #1a1c22'}}>
         {imgSrc?<>
           <img ref={imgRef} src={result?.displayUrl||imgSrc} style={{width:'100%',display:'block'}}/>
           <canvas ref={canvasRef} style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none'}}/>
           {loading&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,.75)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}>
             <div style={{fontFamily:mono,fontSize:11,color:'#00ff88'}}>Analyzing…</div>
-            <div style={{fontFamily:mono,fontSize:9,color:'#555'}}>Detecting angle · Measuring borders</div>
           </div>}
+          {/* On-image nudge arrows — inner border (green) */}
+          {result&&<>
+            <div style={{position:'absolute',top:'8%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
+              <button onClick={()=>setBorderOverrides(p=>({...p,T:p.T-1}))} style={arrowBtn('#00ff88')}>▲</button>
+              <button onClick={()=>setBorderOverrides(p=>({...p,T:p.T+1}))} style={arrowBtn('#00ff88')}>▼</button>
+            </div>
+            <div style={{position:'absolute',bottom:'8%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
+              <button onClick={()=>setBorderOverrides(p=>({...p,B:p.B+1}))} style={arrowBtn('#00ff88')}>▲</button>
+              <button onClick={()=>setBorderOverrides(p=>({...p,B:p.B-1}))} style={arrowBtn('#00ff88')}>▼</button>
+            </div>
+            <div style={{position:'absolute',left:'4%',top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
+              <button onClick={()=>setBorderOverrides(p=>({...p,L:p.L-1}))} style={arrowBtn('#00ff88')}>◀</button>
+              <button onClick={()=>setBorderOverrides(p=>({...p,L:p.L+1}))} style={arrowBtn('#00ff88')}>▶</button>
+            </div>
+            <div style={{position:'absolute',right:'4%',top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
+              <button onClick={()=>setBorderOverrides(p=>({...p,R:p.R+1}))} style={arrowBtn('#00ff88')}>◀</button>
+              <button onClick={()=>setBorderOverrides(p=>({...p,R:p.R-1}))} style={arrowBtn('#00ff88')}>▶</button>
+            </div>
+            {/* Outer boundary arrows (orange) — at image edges */}
+            <div style={{position:'absolute',top:'2%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
+              <button onClick={()=>setOuterOffsets(p=>({...p,T:p.T+1}))} style={arrowBtn('#ff9944')}>▼</button>
+              <button onClick={()=>setOuterOffsets(p=>({...p,T:p.T-1}))} style={arrowBtn('#ff9944')}>▲</button>
+            </div>
+            <div style={{position:'absolute',bottom:'2%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
+              <button onClick={()=>setOuterOffsets(p=>({...p,B:p.B+1}))} style={arrowBtn('#ff9944')}>▲</button>
+              <button onClick={()=>setOuterOffsets(p=>({...p,B:p.B-1}))} style={arrowBtn('#ff9944')}>▼</button>
+            </div>
+            <div style={{position:'absolute',left:'1%',top:'35%',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
+              <button onClick={()=>setOuterOffsets(p=>({...p,L:p.L+1}))} style={arrowBtn('#ff9944')}>▶</button>
+              <button onClick={()=>setOuterOffsets(p=>({...p,L:p.L-1}))} style={arrowBtn('#ff9944')}>◀</button>
+            </div>
+            <div style={{position:'absolute',right:'1%',top:'35%',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
+              <button onClick={()=>setOuterOffsets(p=>({...p,R:p.R+1}))} style={arrowBtn('#ff9944')}>◀</button>
+              <button onClick={()=>setOuterOffsets(p=>({...p,R:p.R-1}))} style={arrowBtn('#ff9944')}>▶</button>
+            </div>
+          </>}
         </>:<div onClick={()=>fileRef.current?.click()} style={{aspectRatio:'2.5/3.5',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',cursor:'pointer',gap:10}}>
           <div style={{fontSize:36}}>📷</div>
           <div style={{fontFamily:mono,fontSize:10,color:'#444'}}>TAP TO UPLOAD</div>
@@ -473,7 +528,7 @@ function CardPanel({label, side, onResult}) {
           ))}
         </div>
         {/* Border widths */}
-        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:4,marginBottom:10}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:4,marginBottom:8}}>
           {[['L',bL,c.scanL],['R',bR,c.scanR],['T',bT,c.scanT],['B',bB,c.scanB]].map(([lbl,px,scan])=>(
             <div key={lbl} style={{padding:'5px 3px',background:'rgba(0,0,0,.3)',borderRadius:5,textAlign:'center'}}>
               <div style={{fontFamily:mono,fontSize:8,color:'#555'}}>{lbl}</div>
@@ -482,27 +537,8 @@ function CardPanel({label, side, onResult}) {
             </div>
           ))}
         </div>
-        {/* Inner border nudge */}
-        <div style={{fontFamily:mono,fontSize:8,color:'#00ff88',marginBottom:4,textTransform:'uppercase'}}>Inner border (green)</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:4,marginBottom:10}}>
-          {[['L','L'],['R','R'],['T','T'],['B','B']].map(([lbl,edge])=>(
-            <div key={edge} style={{display:'flex',flexDirection:'column',gap:2}}>
-              <div style={{fontFamily:mono,fontSize:8,color:'#555',textAlign:'center'}}>{lbl}</div>
-              <button onClick={()=>setBorderOverrides(p=>({...p,[edge]:p[edge]-1}))} style={nudgeBtn}>−</button>
-              <button onClick={()=>setBorderOverrides(p=>({...p,[edge]:p[edge]+1}))} style={nudgeBtn}>+</button>
-            </div>
-          ))}
-        </div>
-        {/* Outer bound nudge */}
-        <div style={{fontFamily:mono,fontSize:8,color:'#ff9944',marginBottom:4,textTransform:'uppercase'}}>Outer boundary (orange)</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:4}}>
-          {[['L','L'],['R','R'],['T','T'],['B','B']].map(([lbl,edge])=>(
-            <div key={edge} style={{display:'flex',flexDirection:'column',gap:2}}>
-              <div style={{fontFamily:mono,fontSize:8,color:'#555',textAlign:'center'}}>{lbl}</div>
-              <button onClick={()=>setOuterOffsets(p=>({...p,[edge]:p[edge]-1}))} style={{...nudgeBtn,borderColor:'#ff994466'}}>−</button>
-              <button onClick={()=>setOuterOffsets(p=>({...p,[edge]:p[edge]+1}))} style={{...nudgeBtn,borderColor:'#ff994466'}}>+</button>
-            </div>
-          ))}
+        <div style={{fontFamily:mono,fontSize:8,color:'#555',marginBottom:8}}>
+          Green arrows = inner border · Orange arrows = outer card edge
         </div>
         {/* Debug dump */}
         <details style={{marginTop:10}}>
@@ -516,7 +552,12 @@ function CardPanel({label, side, onResult}) {
   );
 }
 
-const nudgeBtn={padding:'4px 0',width:'100%',borderRadius:4,background:'transparent',border:'1px solid #333',color:'#aaa',fontFamily:'monospace',fontSize:13,cursor:'pointer',lineHeight:1};
+const arrowBtn=(color='#fff')=>({
+  padding:'5px 7px',borderRadius:5,
+  background:'rgba(0,0,0,.7)',border:`1px solid ${color}55`,
+  color,fontSize:11,cursor:'pointer',lineHeight:1,
+  backdropFilter:'blur(4px)',
+});
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 export default function App(){
