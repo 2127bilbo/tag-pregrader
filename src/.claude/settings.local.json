@@ -6,7 +6,9 @@
       "WebFetch(domain:www.centergrade.com)",
       "WebFetch(domain:cardgrade.io)",
       "WebFetch(domain:www.tcgrader.com)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

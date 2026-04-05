@@ -35,15 +35,41 @@ const LUM=(r,g,b)=>.299*r+.587*g+.114*b;
    Fallback for when local detection fails.
    Uses Vercel serverless proxy at /api/centeringcheck
    ═══════════════════════════════════════════ */
+// Compress image for API upload (Vercel has ~4.5MB limit)
+async function compressImageForAPI(imageBase64, maxWidth = 1200, quality = 0.80) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w > maxWidth) {
+        h = Math.round(h * (maxWidth / w));
+        w = maxWidth;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.src = imageBase64;
+  });
+}
+
 async function callCenteringCheckAPI(imageBase64) {
   try {
+    // Compress image to stay under Vercel's 4.5MB limit
+    const compressed = await compressImageForAPI(imageBase64, 1200, 0.80);
+    console.log('CenteringCheck: Original', Math.round(imageBase64.length/1024), 'KB → Compressed', Math.round(compressed.length/1024), 'KB');
+
     const response = await fetch('/api/centeringcheck', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: imageBase64, warp: true }),
+      body: JSON.stringify({ image: compressed, warp: true }),
     });
     if (!response.ok) {
-      console.warn('CenteringCheck API failed:', response.status);
+      const errText = await response.text();
+      console.warn('CenteringCheck API failed:', response.status, errText);
       return null;
     }
     return await response.json();
