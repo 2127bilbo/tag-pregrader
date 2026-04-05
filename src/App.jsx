@@ -331,8 +331,12 @@ function drawOverlay(canvas, result, borderOverrides, outerOffsets) {
   const bT=Math.max(0,(borderOverrides?.T||0)+c.bT);
   const bB=Math.max(0,(borderOverrides?.B||0)+c.bB);
 
-  // Inner border line positions
-  const iL=cl+bL, iR=cr-bR, iT=ct+bT, iB=cb-bB;
+  // Inner border line positions — clamped so they never invert
+  // (can happen when bounds=full-image and border scans are wrong)
+  const iL=Math.min(cl+bL, cl+cW*0.48);
+  const iR=Math.max(cr-bR, cl+cW*0.52);
+  const iT=Math.min(ct+bT, ct+cH*0.48);
+  const iB=Math.max(cb-bB, ct+cH*0.52);
 
   // Outer card boundary (orange)
   ctx.strokeStyle='#ff9944'; ctx.lineWidth=3; ctx.setLineDash([]);
@@ -431,20 +435,21 @@ function CardPanel({label, side, onResult}) {
   useEffect(()=>{borderRef.current=borderOverrides;},[borderOverrides]);
   useEffect(()=>{outerRef.current=outerOffsets;},[outerOffsets]);
 
-  // Convert client coords to canvas pixel coords
+  // Convert client coords to canvas pixel coords + return display scale
   const clientToCanvas=(clientX,clientY)=>{
-    const c=canvasRef.current; if(!c) return{x:0,y:0};
+    const c=canvasRef.current; if(!c) return{x:0,y:0,scaleX:1,scaleY:1};
     const rect=c.getBoundingClientRect();
     const scaleX=c.width/rect.width, scaleY=c.height/rect.height;
-    return{x:(clientX-rect.left)*scaleX, y:(clientY-rect.top)*scaleY};
+    return{x:(clientX-rect.left)*scaleX, y:(clientY-rect.top)*scaleY, scaleX, scaleY};
   };
 
-  const hitHandle=(cx,cy)=>handlesRef.current.find(h=>Math.hypot(h.x-cx,h.y-cy)<=h.r);
+  // Hit test — radius is scaled by display ratio so mobile taps work at ~24 display px
+  const hitHandle=(cx,cy,scaleX)=>handlesRef.current.find(h=>Math.hypot(h.x-cx,h.y-cy)<=(h.r*Math.max(1,scaleX)));
 
   const onPointerDown=e=>{
     e.preventDefault();
-    const{x,y}=clientToCanvas(e.clientX,e.clientY);
-    const h=hitHandle(x,y);
+    const{x,y,scaleX}=clientToCanvas(e.clientX,e.clientY);
+    const h=hitHandle(x,y,scaleX);
     if(!h) return;
     dragRef.current={id:h.id,axis:h.axis,startX:x,startY:y,
       startBorder:{...borderRef.current},startOuter:{...outerRef.current}};
@@ -588,6 +593,11 @@ function CardPanel({label, side, onResult}) {
           value={activeAngle}
           onChange={e=>{const a=parseFloat(e.target.value);setAngleOverride(a);recomputeAngle(a);}}
           style={{width:'100%',accentColor:'#ff9944'}}/>
+      </div>}
+
+      {/* Full-frame warning — detection fails when card fills photo edge to edge */}
+      {result?.bounds?.method==='bg-fallback'&&<div style={{background:'rgba(255,150,0,.08)',border:'1px solid #ff990033',borderRadius:8,padding:'8px 12px',marginBottom:6}}>
+        <div style={{fontFamily:mono,fontSize:9,color:'#ff9944'}}>⚠ Card fills frame — include background in photo for accurate detection. Use handles to correct manually.</div>
       </div>}
 
       {/* Centering readout */}
