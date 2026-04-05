@@ -322,6 +322,19 @@ function warpPerspective(srcData,w,h,corners){
   return {data:out,w:outW,h:outH};
 }
 
+function clampCorner(pt,w,h){
+  return {x:CLAMP(pt.x,0,w-1), y:CLAMP(pt.y,0,h-1)};
+}
+
+function cornersFromBounds(bn){
+  return {
+    tl:{x:bn.left,y:bn.top},
+    tr:{x:bn.right,y:bn.top},
+    br:{x:bn.right,y:bn.bottom},
+    bl:{x:bn.left,y:bn.bottom},
+  };
+}
+
 function detectCenteringRectified(d,w,h){
   const LINES=9;
   const maxDepth=Math.round(Math.min(w,h)*0.22);
@@ -644,7 +657,17 @@ async function analyzeCard(src) {
   const angle=angleResult.angle;
 
   const lines=detectCardLines(d,w,h,bounds);
-  const corners=lines?computeCardCorners(lines):null;
+  let corners=lines?computeCardCorners(lines):null;
+  if(!corners){
+    corners=cornersFromBounds(bounds);
+  }else{
+    corners={
+      tl:clampCorner(corners.tl,w,h),
+      tr:clampCorner(corners.tr,w,h),
+      br:clampCorner(corners.br,w,h),
+      bl:clampCorner(corners.bl,w,h),
+    };
+  }
   let rect=null;
   if(corners){ rect=warpPerspective(d,w,h,corners); }
 
@@ -660,6 +683,7 @@ async function analyzeCard(src) {
 
   let centering=detectCentering(d,w,h,bounds,angle,bgColor);
   let rectUrl=null;
+  let rectAvg=null;
   if(rect){
     // Compute quick brightness check to reject bad warps
     let sum=0, n=0;
@@ -668,6 +692,7 @@ async function analyzeCard(src) {
       n++;
     }
     const avg = n?sum/(n*3):0;
+    rectAvg=avg;
     if(avg>8){
       centering=detectCenteringRectified(rect.data,rect.w,rect.h);
       const c=document.createElement('canvas'); c.width=rect.w; c.height=rect.h;
@@ -679,7 +704,7 @@ async function analyzeCard(src) {
     }
   }
 
-  return{srcCanvas:canvas,imgUrl,rectUrl,rect,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
+  return{srcCanvas:canvas,imgUrl,rectUrl,rect,rectAvg,w,h,bounds,centering,angle,angleResult,cardW:bounds.cardW,cardH:bounds.cardH};
 }
 
 // ─── Card display with overlay ─────────────────────────────────────────────────
@@ -960,6 +985,7 @@ function CardPanel({label,side,onResult}){
           appliedAngle:activeAngle,
           angleSources:result.angleResult?.allAngles?.map(a=>Math.round(a*100)/100),
           centering:{lrRatio,tbRatio,bL,bR,bT,bB},
+          rectInfo:{used:!!result.rectUrl,rectSize:result.rect?{w:result.rect.w,h:result.rect.h}:null,rectAvg:result.rectAvg},
           scanDetails:{
             L:{w:c.scanL?.width,iqr:c.scanL?.iqr,conf:c.scanL?.confidence,mode:c.scanL?.mode,color:c.scanL?.borderColor,tol:c.scanL?.tol},
             R:{w:c.scanR?.width,iqr:c.scanR?.iqr,conf:c.scanR?.confidence,mode:c.scanR?.mode,color:c.scanR?.borderColor,tol:c.scanR?.tol},
