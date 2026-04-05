@@ -1,0 +1,310 @@
+Run these one at a time and paste results:
+1. Find the centering calculation function:
+javascript// Search all loaded script content for centering math
+let found = '';
+performance.getEntriesByType('resource')
+  .filter(r=>r.name.includes('centeringcheck') && r.initiatorType==='script')
+  .forEach(r=>{ found += r.name + '\n'; });
+console.log(found);
+2. Intercept canvas operations — upload a card AFTER running this:
+javascriptconst orig = CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData = function(x,y,w,h) {
+  console.log('getImageData:', x, y, w, h, '| canvas:', this.canvas.width, 'x', this.canvas.height);
+  return orig.apply(this, arguments);
+};
+3. Watch for rotation transforms:
+javascriptconst origT = CanvasRenderingContext2D.prototype.transform;
+const origR = CanvasRenderingContext2D.prototype.rotate;
+CanvasRenderingContext2D.prototype.rotate = function(angle) {
+  console.log('ROTATE:', (angle * 180/Math.PI).toFixed(3) + '°');
+  return origR.apply(this, arguments);
+};
+4. After uploading a card, dump the React component tree to find state:
+javascript// Find the root React fiber
+const root = document.getElementById('root');
+const key = Object.keys(root).find(k => k.startsWith('__reactFiber'));
+let fiber = root[key];
+// Walk up to find state with centering data
+let node = fiber;
+for(let i=0; i<50; i++) {
+  if(node?.memoizedState?.queue) {
+    const val = node.memoizedState.memoizedState;
+    if(val && typeof val === 'object') console.log(i, JSON.stringify(val).substring(0,200));
+  }
+  node = node?.child || node?.sibling || node?.return;
+  if(!node) break;
+}
+Run #2 and #3 first, then upload a card, then paste everything that logged to console.
+
+
+my info back-
+
+// Search all loaded script content for centering math
+let found = '';
+performance.getEntriesByType('resource')
+  .filter(r=>r.name.includes('centeringcheck') && r.initiatorType==='script')
+  .forEach(r=>{ found += r.name + '\n'; });
+console.log(found);
+VM787:6 https://www.centeringcheck.com/_next/static/chunks/5cedbe3d28acc407.js
+https://www.centeringcheck.com/_next/static/chunks/7e21b7a473b66e61.js
+https://www.centeringcheck.com/_next/static/chunks/cc759f7c2413b7ff.js
+https://www.centeringcheck.com/_next/static/chunks/turbopack-94876bb92eb1e750.js
+https://www.centeringcheck.com/_next/static/chunks/ff1a16fafef87110.js
+https://www.centeringcheck.com/_next/static/chunks/7340adf74ff47ec0.js
+https://www.centeringcheck.com/_next/static/chunks/ca69c15d77101795.js
+https://www.centeringcheck.com/_next/static/chunks/1a5a6e54a75f5377.js
+https://www.centeringcheck.com/_next/static/chunks/9f86dea0c61d3250.js
+https://www.centeringcheck.com/_next/static/chunks/92352cf6799d2a23.js
+
+undefined
+const orig = CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData = function(x,y,w,h) {
+  console.log('getImageData:', x, y, w, h, '| canvas:', this.canvas.width, 'x', this.canvas.height);
+  return orig.apply(this, arguments);
+};
+ƒ (x,y,w,h) {
+  console.log('getImageData:', x, y, w, h, '| canvas:', this.canvas.width, 'x', this.canvas.height);
+  return orig.apply(this, arguments);
+}
+VM791:3 getImageData: 0 0 10 10 | canvas: 10 x 10
+2VM791:3 getImageData: 343 62 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 335 62 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 334 61 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 335 62 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 334 61 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 326 61 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 317 61 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 308 60 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 299 60 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 290 59 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 282 59 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 273 58 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 264 58 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 255 57 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 246 57 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 238 56 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 229 55 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 220 55 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 211 54 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 203 54 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 185 52 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 177 52 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 169 51 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 160 51 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 152 50 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 145 49 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 137 49 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 129 48 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 121 47 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 114 47 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 107 46 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 100 45 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 94 45 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 86 44 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 79 44 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 73 43 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 67 42 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 61 41 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 54 41 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 48 40 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 42 39 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 35 39 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 30 38 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 25 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 19 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 14 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 9 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 4 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: -1 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 3 132 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 15 134 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 25 136 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 37 138 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 48 140 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 60 142 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 71 144 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 82 146 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 93 148 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 106 150 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 118 152 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 129 156 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 141 158 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 152 160 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 164 161 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 175 164 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 187 165 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 198 167 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 210 169 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 221 171 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 232 173 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 257 177 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 267 179 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 279 181 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 290 183 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 302 185 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 312 187 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 324 189 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 335 190 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 334 189 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 335 190 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 334 189 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 346 193 1 1 | canvas: 347 x 471
+const origT = CanvasRenderingContext2D.prototype.transform;
+const origR = CanvasRenderingContext2D.prototype.rotate;
+CanvasRenderingContext2D.prototype.rotate = function(angle) {
+  console.log('ROTATE:', (angle * 180/Math.PI).toFixed(3) + '°');
+  return origR.apply(this, arguments);
+};
+ƒ (angle) {
+  console.log('ROTATE:', (angle * 180/Math.PI).toFixed(3) + '°');
+  return origR.apply(this, arguments);
+}
+2VM791:3 getImageData: 336 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 323 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 310 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 299 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 286 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 275 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 262 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 250 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 238 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 226 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 215 34 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 204 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 193 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 181 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 170 35 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 158 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 146 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 123 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 112 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 100 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 90 36 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 79 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 67 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 57 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 47 37 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 36 38 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 26 38 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 15 38 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 6 38 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 3 69 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 12 72 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 22 75 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 31 80 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 41 83 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 50 86 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 59 89 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 69 92 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 78 95 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 87 98 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 98 101 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 107 105 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 116 108 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 127 111 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 136 114 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 147 117 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 156 120 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 166 122 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 176 125 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 186 129 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 196 131 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 205 134 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 226 138 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 235 140 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 245 143 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 255 144 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 265 146 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 274 148 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 285 151 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 294 153 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 304 155 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 313 156 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 323 158 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 332 160 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 341 161 1 1 | canvas: 347 x 471
+// Find the root React fiber
+const root = document.getElementById('root');
+const key = Object.keys(root).find(k => k.startsWith('__reactFiber'));
+let fiber = root[key];
+// Walk up to find state with centering data
+let node = fiber;
+for(let i=0; i<50; i++) {
+  if(node?.memoizedState?.queue) {
+    const val = node.memoizedState.memoizedState;
+    if(val && typeof val === 'object') console.log(i, JSON.stringify(val).substring(0,200));
+  }
+  node = node?.child || node?.sibling || node?.return;
+  if(!node) break;
+}
+VM803:10 1 '{"tree":[["slug","","oc"],{"children":["__PAGE__",{}]}],"stateKey":"slug||oc","next":null}'
+VM803:10 15 '{"tree":["__PAGE__",{}],"stateKey":"__PAGE__","next":null}'
+undefined
+2VM791:3 getImageData: 340 11 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 325 10 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 324 9 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 325 10 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 324 9 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 312 10 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 311 9 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 312 10 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 311 9 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 298 9 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 284 9 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 270 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 269 7 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 270 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 269 7 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 256 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 255 7 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 256 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 255 7 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 243 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 242 7 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 243 8 1 1 | canvas: 347 x 471
+VM791:3 getImageData: 242 7 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 229 7 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 215 6 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 201 6 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 188 5 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 175 4 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 160 4 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 147 4 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 132 4 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 119 3 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 105 3 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 91 2 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 77 2 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 48 1 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 35 1 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 21 1 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 7 0 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 2 97 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 12 98 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 24 98 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 34 99 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 46 99 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 57 99 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 69 100 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 81 100 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 92 101 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 104 101 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 117 102 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 128 102 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 140 103 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 151 104 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 174 105 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 186 106 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 199 107 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 210 107 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 222 108 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 235 108 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 246 109 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 259 109 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 270 110 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 282 110 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 295 110 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 306 110 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 318 111 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 329 111 1 1 | canvas: 347 x 471
+2VM791:3 getImageData: 341 112 1 1 | canvas: 347 x 471

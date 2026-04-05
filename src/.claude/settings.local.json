@@ -3,7 +3,9 @@
     "allow": [
       "WebFetch(domain:www.centeringcheck.com)",
       "WebSearch",
-      "WebFetch(domain:www.centergrade.com)"
+      "WebFetch(domain:www.centergrade.com)",
+      "WebFetch(domain:cardgrade.io)",
+      "WebFetch(domain:www.tcgrader.com)"
     ]
   }
 }

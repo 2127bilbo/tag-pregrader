@@ -310,15 +310,15 @@ async function analyzeCard(src) {
 }
 
 // ─── Overlay on deskewed image ────────────────────────────────────────────────
+// Returns handle positions so CardPanel can hit-test mouse/touch events
 function drawOverlay(canvas, result, borderOverrides, outerOffsets) {
-  if(!canvas||!result) return;
+  if(!canvas||!result) return [];
   const bn=result.deskewedBounds;
-  if(!bn) return;
+  if(!bn) return [];
   const w=result.dw, h=result.dh;
   const ctx=canvas.getContext('2d');
   canvas.width=w; canvas.height=h; ctx.clearRect(0,0,w,h);
 
-  // Apply outer offsets
   const cl=bn.left+(outerOffsets?.L||0);
   const cr=bn.right-(outerOffsets?.R||0);
   const ct=bn.top+(outerOffsets?.T||0);
@@ -331,40 +331,85 @@ function drawOverlay(canvas, result, borderOverrides, outerOffsets) {
   const bT=Math.max(0,(borderOverrides?.T||0)+c.bT);
   const bB=Math.max(0,(borderOverrides?.B||0)+c.bB);
 
+  // Inner border line positions
+  const iL=cl+bL, iR=cr-bR, iT=ct+bT, iB=cb-bB;
+
   // Outer card boundary (orange)
   ctx.strokeStyle='#ff9944'; ctx.lineWidth=3; ctx.setLineDash([]);
   ctx.strokeRect(cl,ct,cW,cH);
 
   // Inner artwork boundary (green dashed)
-  ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.setLineDash([10,5]);
-  ctx.strokeRect(cl+bL, ct+bT, cW-bL-bR, cH-bT-bB);
+  ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.setLineDash([8,5]);
+  ctx.strokeRect(iL, iT, iR-iL, iB-iT);
   ctx.setLineDash([]);
 
-  // Border width labels
-  const fs=Math.max(13,~~(cW*0.026));
+  // Border labels
+  const fs=Math.max(12,~~(cW*0.024));
   ctx.font=`bold ${fs}px ${mono}`; ctx.textAlign='center';
   const lc=s=>s?.confidence==='good'?'#00ff88':s?.confidence==='low'?'#ccbb00':'#ff4444';
-  const lbl=(txt,x,y,scan)=>{
-    ctx.fillStyle='rgba(0,0,0,.75)'; ctx.fillRect(x-34,y-14,68,20);
+  const drawLabel=(txt,x,y,scan)=>{
+    ctx.fillStyle='rgba(0,0,0,.8)'; ctx.fillRect(x-32,y-13,64,18);
     ctx.fillStyle=lc(scan); ctx.fillText(txt,x,y);
   };
-  lbl(`L ${bL}px`, cl+bL/2,         ct+cH/2,   c.scanL);
-  lbl(`R ${bR}px`, cr-bR/2,         ct+cH/2,   c.scanR);
-  lbl(`T ${bT}px`, cl+cW/2,         ct+bT/2+6, c.scanT);
-  lbl(`B ${bB}px`, cl+cW/2,         cb-bB/2,   c.scanB);
+  drawLabel(`L ${bL}px`, cl+bL/2, ct+cH/2, c.scanL);
+  drawLabel(`R ${bR}px`, cr-bR/2, ct+cH/2, c.scanR);
+  drawLabel(`T ${bT}px`, cl+cW/2, ct+bT/2+5, c.scanT);
+  drawLabel(`B ${bB}px`, cl+cW/2, cb-bB/2, c.scanB);
 
-  // Centering ratio badge
-  const lrT=bL+bR,tbT=bT+bB;
+  // Centering ratio
+  const lrT=bL+bR, tbT=bT+bB;
   const lrRatio=lrT>0?Math.round((bL/lrT)*1000)/10:50;
   const tbRatio=tbT>0?Math.round((bT/tbT)*1000)/10:50;
   const lrOk=Math.max(lrRatio,100-lrRatio)<=55;
   const tbOk=Math.max(tbRatio,100-tbRatio)<=65;
-  ctx.font=`bold ${Math.max(14,~~(cW*0.030))}px ${mono}`;
+  ctx.font=`bold ${Math.max(13,~~(cW*0.028))}px ${mono}`;
   ctx.fillStyle=(lrOk&&tbOk)?'#00ff88':'#ff6633';
   ctx.fillText(
     `${lrRatio}/${Math.round((100-lrRatio)*10)/10}  ${tbRatio}/${Math.round((100-tbRatio)*10)/10}`,
-    cl+cW/2, ct-16
+    cl+cW/2, Math.max(20, ct-14)
   );
+
+  // Draw drag handles — pill-shaped, sitting ON the border lines
+  // Returns list of handles for hit-testing
+  const handles=[];
+  const HR=14; // handle radius
+  const drawHandle=(x,y,color,id,axis)=>{
+    // Pill shape — horizontal for T/B handles, vertical for L/R
+    const isHoriz=axis==='x';
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.fillStyle=color;
+    ctx.strokeStyle='#fff';
+    ctx.lineWidth=1.5;
+    ctx.beginPath();
+    if(isHoriz){
+      ctx.roundRect(-HR,-HR/2,HR*2,HR,HR/2);
+    } else {
+      ctx.roundRect(-HR/2,-HR,HR,HR*2,HR/2);
+    }
+    ctx.fill(); ctx.stroke();
+    // Arrow indicators
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.font=`bold ${HR-2}px sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(isHoriz?'⟺':'⇕',0,0);
+    ctx.restore();
+    handles.push({x,y,id,axis,r:HR+6});
+  };
+
+  // Inner border handles (green) — dragging moves the inner border line
+  drawHandle(cl+cW/2, iT,  '#00cc66', 'iT', 'x');
+  drawHandle(cl+cW/2, iB,  '#00cc66', 'iB', 'x');
+  drawHandle(iL, ct+cH/2,  '#00cc66', 'iL', 'y');
+  drawHandle(iR, ct+cH/2,  '#00cc66', 'iR', 'y');
+
+  // Outer boundary handles (orange) — dragging moves the card boundary
+  drawHandle(cl+cW/2, ct,  '#ff7722', 'oT', 'x');
+  drawHandle(cl+cW/2, cb,  '#ff7722', 'oB', 'x');
+  drawHandle(cl, ct+cH/2,  '#ff7722', 'oL', 'y');
+  drawHandle(cr, ct+cH/2,  '#ff7722', 'oR', 'y');
+
+  return handles;
 }
 
 // ─── Card Panel ───────────────────────────────────────────────────────────────
@@ -377,6 +422,57 @@ function CardPanel({label, side, onResult}) {
   const[outerOffsets,setOuterOffsets]=useState({L:0,R:0,T:0,B:0});
   const fileRef=useRef(null), canvasRef=useRef(null), imgRef=useRef(null);
   const recomputeRef=useRef(null);
+  const handlesRef=useRef([]);       // current handle positions in canvas px
+  const dragRef=useRef(null);        // {handle, startCanvasPos, startOverride}
+  const borderRef=useRef({L:0,R:0,T:0,B:0});
+  const outerRef=useRef({L:0,R:0,T:0,B:0});
+
+  // Keep refs in sync with state for drag callbacks
+  useEffect(()=>{borderRef.current=borderOverrides;},[borderOverrides]);
+  useEffect(()=>{outerRef.current=outerOffsets;},[outerOffsets]);
+
+  // Convert client coords to canvas pixel coords
+  const clientToCanvas=(clientX,clientY)=>{
+    const c=canvasRef.current; if(!c) return{x:0,y:0};
+    const rect=c.getBoundingClientRect();
+    const scaleX=c.width/rect.width, scaleY=c.height/rect.height;
+    return{x:(clientX-rect.left)*scaleX, y:(clientY-rect.top)*scaleY};
+  };
+
+  const hitHandle=(cx,cy)=>handlesRef.current.find(h=>Math.hypot(h.x-cx,h.y-cy)<=h.r);
+
+  const onPointerDown=e=>{
+    e.preventDefault();
+    const{x,y}=clientToCanvas(e.clientX,e.clientY);
+    const h=hitHandle(x,y);
+    if(!h) return;
+    dragRef.current={id:h.id,axis:h.axis,startX:x,startY:y,
+      startBorder:{...borderRef.current},startOuter:{...outerRef.current}};
+    canvasRef.current.setPointerCapture(e.pointerId);
+  };
+
+  const onPointerMove=e=>{
+    if(!dragRef.current) return;
+    e.preventDefault();
+    const{x,y}=clientToCanvas(e.clientX,e.clientY);
+    const{id,axis,startX,startY,startBorder,startOuter}=dragRef.current;
+    const dx=Math.round(x-startX), dy=Math.round(y-startY);
+    const delta=axis==='x'?dy:dx;
+
+    // Map handle id to which state to update and direction
+    // Inner handles move the border line; positive delta = line moves that direction
+    if(id==='iT') setBorderOverrides(p=>({...p,T:startBorder.T+delta}));
+    if(id==='iB') setBorderOverrides(p=>({...p,B:startBorder.B-delta}));
+    if(id==='iL') setBorderOverrides(p=>({...p,L:startBorder.L+delta}));
+    if(id==='iR') setBorderOverrides(p=>({...p,R:startBorder.R-delta}));
+    // Outer handles move the card boundary
+    if(id==='oT') setOuterOffsets(p=>({...p,T:startOuter.T+delta}));
+    if(id==='oB') setOuterOffsets(p=>({...p,B:startOuter.B-delta}));
+    if(id==='oL') setOuterOffsets(p=>({...p,L:startOuter.L+delta}));
+    if(id==='oR') setOuterOffsets(p=>({...p,R:startOuter.R-delta}));
+  };
+
+  const onPointerUp=e=>{ dragRef.current=null; };
 
   const handleFile=e=>{
     const f=e.target.files?.[0]; if(!f) return;
@@ -413,7 +509,9 @@ function CardPanel({label, side, onResult}) {
   useEffect(()=>{
     if(!result||!canvasRef.current||!imgRef.current) return;
     imgRef.current.src=result.displayUrl;
-    const draw=()=>drawOverlay(canvasRef.current,result,borderOverrides,outerOffsets);
+    const draw=()=>{
+      handlesRef.current=drawOverlay(canvasRef.current,result,borderOverrides,outerOffsets)||[];
+    };
     if(imgRef.current.complete&&imgRef.current.naturalWidth) draw();
     else imgRef.current.onload=draw;
   },[result,borderOverrides,outerOffsets]);
@@ -440,50 +538,19 @@ function CardPanel({label, side, onResult}) {
         <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:'none'}}/>
       </div>
 
-      {/* Image + overlay + on-image nudge arrows */}
+      {/* Image + draggable overlay */}
       <div style={{position:'relative',background:'#0a0a0a',borderRadius:10,overflow:'hidden',border:'1px solid #1a1c22'}}>
         {imgSrc?<>
-          <img ref={imgRef} src={result?.displayUrl||imgSrc} style={{width:'100%',display:'block'}}/>
-          <canvas ref={canvasRef} style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none'}}/>
+          <img ref={imgRef} src={result?.displayUrl||imgSrc} style={{width:'100%',display:'block',userSelect:'none'}}/>
+          <canvas ref={canvasRef}
+            style={{position:'absolute',inset:0,width:'100%',height:'100%',cursor:'crosshair',touchAction:'none'}}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+          />
           {loading&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,.75)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6}}>
             <div style={{fontFamily:mono,fontSize:11,color:'#00ff88'}}>Analyzing…</div>
           </div>}
-          {/* On-image nudge arrows — inner border (green) */}
-          {result&&<>
-            <div style={{position:'absolute',top:'8%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
-              <button onClick={()=>setBorderOverrides(p=>({...p,T:p.T-1}))} style={arrowBtn('#00ff88')}>▲</button>
-              <button onClick={()=>setBorderOverrides(p=>({...p,T:p.T+1}))} style={arrowBtn('#00ff88')}>▼</button>
-            </div>
-            <div style={{position:'absolute',bottom:'8%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
-              <button onClick={()=>setBorderOverrides(p=>({...p,B:p.B+1}))} style={arrowBtn('#00ff88')}>▲</button>
-              <button onClick={()=>setBorderOverrides(p=>({...p,B:p.B-1}))} style={arrowBtn('#00ff88')}>▼</button>
-            </div>
-            <div style={{position:'absolute',left:'4%',top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
-              <button onClick={()=>setBorderOverrides(p=>({...p,L:p.L-1}))} style={arrowBtn('#00ff88')}>◀</button>
-              <button onClick={()=>setBorderOverrides(p=>({...p,L:p.L+1}))} style={arrowBtn('#00ff88')}>▶</button>
-            </div>
-            <div style={{position:'absolute',right:'4%',top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
-              <button onClick={()=>setBorderOverrides(p=>({...p,R:p.R+1}))} style={arrowBtn('#00ff88')}>◀</button>
-              <button onClick={()=>setBorderOverrides(p=>({...p,R:p.R-1}))} style={arrowBtn('#00ff88')}>▶</button>
-            </div>
-            {/* Outer boundary arrows (orange) — at image edges */}
-            <div style={{position:'absolute',top:'2%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
-              <button onClick={()=>setOuterOffsets(p=>({...p,T:p.T+1}))} style={arrowBtn('#ff9944')}>▼</button>
-              <button onClick={()=>setOuterOffsets(p=>({...p,T:p.T-1}))} style={arrowBtn('#ff9944')}>▲</button>
-            </div>
-            <div style={{position:'absolute',bottom:'2%',left:'50%',transform:'translateX(-50%)',display:'flex',gap:3,zIndex:10}}>
-              <button onClick={()=>setOuterOffsets(p=>({...p,B:p.B+1}))} style={arrowBtn('#ff9944')}>▲</button>
-              <button onClick={()=>setOuterOffsets(p=>({...p,B:p.B-1}))} style={arrowBtn('#ff9944')}>▼</button>
-            </div>
-            <div style={{position:'absolute',left:'1%',top:'35%',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
-              <button onClick={()=>setOuterOffsets(p=>({...p,L:p.L+1}))} style={arrowBtn('#ff9944')}>▶</button>
-              <button onClick={()=>setOuterOffsets(p=>({...p,L:p.L-1}))} style={arrowBtn('#ff9944')}>◀</button>
-            </div>
-            <div style={{position:'absolute',right:'1%',top:'35%',display:'flex',flexDirection:'column',gap:3,zIndex:10}}>
-              <button onClick={()=>setOuterOffsets(p=>({...p,R:p.R+1}))} style={arrowBtn('#ff9944')}>◀</button>
-              <button onClick={()=>setOuterOffsets(p=>({...p,R:p.R-1}))} style={arrowBtn('#ff9944')}>▶</button>
-            </div>
-          </>}
         </>:<div onClick={()=>fileRef.current?.click()} style={{aspectRatio:'2.5/3.5',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',cursor:'pointer',gap:10}}>
           <div style={{fontSize:36}}>📷</div>
           <div style={{fontFamily:mono,fontSize:10,color:'#444'}}>TAP TO UPLOAD</div>
@@ -538,7 +605,7 @@ function CardPanel({label, side, onResult}) {
           ))}
         </div>
         <div style={{fontFamily:mono,fontSize:8,color:'#555',marginBottom:8}}>
-          Green arrows = inner border · Orange arrows = outer card edge
+          Drag green handles = inner border · Drag orange handles = card edge
         </div>
         {/* Debug dump */}
         <details style={{marginTop:10}}>
@@ -551,13 +618,6 @@ function CardPanel({label, side, onResult}) {
     </div>
   );
 }
-
-const arrowBtn=(color='#fff')=>({
-  padding:'5px 7px',borderRadius:5,
-  background:'rgba(0,0,0,.7)',border:`1px solid ${color}55`,
-  color,fontSize:11,cursor:'pointer',lineHeight:1,
-  backdropFilter:'blur(4px)',
-});
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 export default function App(){
