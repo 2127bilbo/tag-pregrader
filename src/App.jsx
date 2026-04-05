@@ -168,7 +168,9 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
 
   const SAMPLES=32;
   const MAX_BORDER=Math.round(Math.min(cW,cH)*0.22);
-  const EDGE_SEARCH=15; // how far to search for actual physical card edge
+  const EDGE_SEARCH=5; // ±5px only — just fine-tuning the detected bound.
+  // ±15 was too wide: for T/B edges it found Pokémon-text gradients 10-15px
+  // inside the card instead of the physical card edge, corrupting color sampling.
 
   // Phase 1: Find actual card edges + sample border color
   const edgePositions=[];
@@ -179,8 +181,7 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
     const ex=edgeStartX+alongX*t;
     const ey=edgeStartY+alongY*t;
 
-    // Find actual card edge: search ±EDGE_SEARCH px around detected bound
-    // for the sharpest luminance gradient (background→card transition)
+    // Fine-tune the detected bound position (±EDGE_SEARCH px)
     let outerX=ex,outerY=ey,bestGrad=0;
     for(let dep=-EDGE_SEARCH;dep<=EDGE_SEARCH;dep++){
       const px=ex+perpInX*dep,py=ey+perpInY*dep;
@@ -193,8 +194,9 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg) {
     }
     edgePositions.push({x:outerX,y:outerY,foundGrad:bestGrad});
 
-    // Sample border color from 3-10px inward from the real card edge
-    for(let dep=3;dep<=10;dep++){
+    // Sample border color from dep 2-5 only — very close to the card edge.
+    // Deeper sampling (3-10) was hitting text/artwork on T/B edges, giving wrong color.
+    for(let dep=2;dep<=5;dep++){
       const px=CLAMP(Math.round(outerX+perpInX*dep),0,w-1);
       const py=CLAMP(Math.round(outerY+perpInY*dep),0,h-1);
       const [r,g,b]=PX(d,w,px,py);
@@ -360,6 +362,7 @@ function CardPanel({label,side,onResult}){
   const[debug,setDebug]=useState(false);
   const[angleOverride,setAngleOverride]=useState(null);
   const[borderOverrides,setBorderOverrides]=useState({L:0,R:0,T:0,B:0});
+  const[outerOffsets,setOuterOffsets]=useState({L:0,R:0,T:0,B:0});
   const[recomputedCentering,setRecomputedCentering]=useState(null);
   const[liveRatios,setLiveRatios]=useState(null);
   const fileRef=useRef(null);
@@ -372,6 +375,7 @@ function CardPanel({label,side,onResult}){
       const src=ev.target.result;
       setImgSrc(src);setResult(null);setLoading(true);
       setAngleOverride(null);setBorderOverrides({L:0,R:0,T:0,B:0});
+      setOuterOffsets({L:0,R:0,T:0,B:0});
       setRecomputedCentering(null);setLiveRatios(null);
       const res=await analyzeCard(src);
       setResult(res);setLoading(false);
@@ -406,8 +410,23 @@ function CardPanel({label,side,onResult}){
     setBorderOverrides(prev=>({...prev,[edge]:Math.max(-20,(prev[edge]||0)+delta)}));
   };
 
+  const nudgeOuter=(edge,delta)=>{
+    setOuterOffsets(prev=>({...prev,[edge]:(prev[edge]||0)+delta}));
+  };
+
+  // Apply outer offsets to bounds for centering display
+  const adjBounds = result ? {
+    ...result.bounds,
+    left:  result.bounds.left  + (outerOffsets.L||0),
+    right: result.bounds.right - (outerOffsets.R||0),
+    top:   result.bounds.top   + (outerOffsets.T||0),
+    bottom:result.bounds.bottom- (outerOffsets.B||0),
+    cardW: result.bounds.cardW - (outerOffsets.L||0) - (outerOffsets.R||0),
+    cardH: result.bounds.cardH - (outerOffsets.T||0) - (outerOffsets.B||0),
+  } : null;
+
   const resetAll=()=>{
-    if(result){setAngleOverride(result.angleResult?.angle||0);setBorderOverrides({L:0,R:0,T:0,B:0});}
+    if(result){setAngleOverride(result.angleResult?.angle||0);setBorderOverrides({L:0,R:0,T:0,B:0});setOuterOffsets({L:0,R:0,T:0,B:0});}
   };
 
   const activeAngle=angleOverride??result?.angle??0;
@@ -459,29 +478,50 @@ function CardPanel({label,side,onResult}){
                    style={{width:'100%',accentColor:'#ff9944'}}/>
                </div>}
 
-               {/* Cropped upright card with overlay */}
-               {result&&<div style={{position:'relative'}}>
+               {/* Cropped upright card — constrained height so it doesn't fill screen */}
+               {result&&<div style={{position:'relative',maxHeight:'60vh',overflow:'hidden',borderRadius:6,display:'flex',justifyContent:'center'}}>
+                 <div style={{position:'relative',maxHeight:'60vh',width:'100%'}}>
                  <CardDisplay result={result} angleOverride={activeAngle} borderOverrides={borderOverrides} debug={debug}/>
 
-                 {/* Top edge nudge */}
+                 {/* INNER border nudge arrows (green dashed box) */}
+                 {/* Top */}
                  <div style={{position:'absolute',top:Math.max(2,bT-14),left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
-                   <button onClick={()=>nudgeBorder('T',-1)} style={arrowBtn}>▲</button>
-                   <button onClick={()=>nudgeBorder('T',1)}  style={arrowBtn}>▼</button>
+                   <button onClick={()=>nudgeBorder('T',-1)} style={arrowBtn} title="Inner border up">▲</button>
+                   <button onClick={()=>nudgeBorder('T',1)}  style={arrowBtn} title="Inner border down">▼</button>
                  </div>
-                 {/* Bottom edge nudge */}
+                 {/* Bottom */}
                  <div style={{position:'absolute',bottom:Math.max(2,bB-14),left:'50%',transform:'translateX(-50%)',display:'flex',gap:2,zIndex:10}}>
-                   <button onClick={()=>nudgeBorder('B',1)}  style={arrowBtn}>▲</button>
-                   <button onClick={()=>nudgeBorder('B',-1)} style={arrowBtn}>▼</button>
+                   <button onClick={()=>nudgeBorder('B',1)}  style={arrowBtn} title="Inner border up">▲</button>
+                   <button onClick={()=>nudgeBorder('B',-1)} style={arrowBtn} title="Inner border down">▼</button>
                  </div>
-                 {/* Left edge nudge */}
+                 {/* Left */}
                  <div style={{position:'absolute',left:Math.max(2,bL-14),top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
                    <button onClick={()=>nudgeBorder('L',-1)} style={arrowBtn}>◀</button>
                    <button onClick={()=>nudgeBorder('L',1)}  style={arrowBtn}>▶</button>
                  </div>
-                 {/* Right edge nudge */}
+                 {/* Right */}
                  <div style={{position:'absolute',right:Math.max(2,bR-14),top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:2,zIndex:10}}>
                    <button onClick={()=>nudgeBorder('R',1)}  style={arrowBtn}>◀</button>
                    <button onClick={()=>nudgeBorder('R',-1)} style={arrowBtn}>▶</button>
+                 </div>
+
+                 {/* OUTER boundary nudge arrows (orange box) — small, at card edges */}
+                 <div style={{position:'absolute',top:2,left:'50%',transform:'translateX(-50%)',display:'flex',gap:1,zIndex:10}}>
+                   <button onClick={()=>nudgeOuter('T',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card top edge in">▼</button>
+                   <button onClick={()=>nudgeOuter('T',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card top edge out">▲</button>
+                 </div>
+                 <div style={{position:'absolute',bottom:2,left:'50%',transform:'translateX(-50%)',display:'flex',gap:1,zIndex:10}}>
+                   <button onClick={()=>nudgeOuter('B',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card bottom edge in">▲</button>
+                   <button onClick={()=>nudgeOuter('B',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 5px'}} title="Move card bottom edge out">▼</button>
+                 </div>
+                 <div style={{position:'absolute',left:2,top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:1,zIndex:10}}>
+                   <button onClick={()=>nudgeOuter('L',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card left edge in">▶</button>
+                   <button onClick={()=>nudgeOuter('L',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card left edge out">◀</button>
+                 </div>
+                 <div style={{position:'absolute',right:2,top:'50%',transform:'translateY(-50%)',display:'flex',flexDirection:'column',gap:1,zIndex:10}}>
+                   <button onClick={()=>nudgeOuter('R',1)}  style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card right edge in">◀</button>
+                   <button onClick={()=>nudgeOuter('R',-1)} style={{...arrowBtn,background:'rgba(255,100,0,.6)',fontSize:8,padding:'2px 4px'}} title="Move card right edge out">▶</button>
+                 </div>
                  </div>
                </div>}
              </div>
