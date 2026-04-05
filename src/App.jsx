@@ -528,12 +528,18 @@ function CardPanel({label, side, onResult}) {
 
   useEffect(()=>{
     if(!result||!canvasRef.current||!imgRef.current) return;
-    imgRef.current.src=result.displayUrl;
     const draw=()=>{
       handlesRef.current=drawOverlay(canvasRef.current,result,borderOverrides,outerOffsets)||[];
     };
-    if(imgRef.current.complete&&imgRef.current.naturalWidth) draw();
-    else imgRef.current.onload=draw;
+    // Only reassign src when the image actually changed (rotation/new upload).
+    // Re-assigning the same src can reset complete→false and onload never fires,
+    // causing canvas to freeze during drag even though state updates correctly.
+    if(imgRef.current.src!==result.displayUrl){
+      imgRef.current.src=result.displayUrl;
+      imgRef.current.onload=draw;
+    } else {
+      draw(); // image already loaded, redraw overlay immediately
+    }
   },[result,borderOverrides,outerOffsets]);
 
   const activeAngle=angleOverride??result?.angle??0;
