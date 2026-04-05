@@ -169,13 +169,6 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   const SAMPLES=32;
   const MAX_BORDER=Math.round(Math.min(cW,cH)*0.22);
 
-  // Background color distance function — used to precisely find card edge
-  const bgDistFn = bgColor
-    ? (r,g,b)=>Math.sqrt((r-bgColor.r)**2+(g-bgColor.g)**2+(b-bgColor.b)**2)
-    : null;
-  // Threshold: pixel is "background-like" if within 40 units of bg color
-  const BG_TOL = 40;
-
   // Phase 1: Find actual card edges + sample border color
   const edgePositions=[];
   const borderColorSamples=[];
@@ -185,44 +178,27 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
     const ex=edgeStartX+alongX*t;
     const ey=edgeStartY+alongY*t;
 
-    // Find precise card edge using background color:
-    // Start at detected bound, walk OUTWARD (away from card) up to 15px.
-    // First position that is clearly background tells us the true card edge.
-    // Then step back 1px to land on the card edge itself.
-    let trueEdgeX=ex, trueEdgeY=ey;
-
-    if(bgDistFn){
-      // Walk outward (negative perp direction = away from card interior)
-      for(let dep=0;dep>=-15;dep--){
-        const px=CLAMP(Math.round(ex+perpInX*dep),0,w-1);
-        const py=CLAMP(Math.round(ey+perpInY*dep),0,h-1);
-        const[r,g,b]=PX(d,w,px,py);
-        if(bgDistFn(r,g,b)<BG_TOL){
-          // This is background — card edge is 1px inward
-          trueEdgeX=ex+perpInX*(dep+1);
-          trueEdgeY=ey+perpInY*(dep+1);
-          break;
-        }
-      }
-      // Also walk inward a little in case bounds overshot into card interior
-      // and the above didn't find background
-    } else {
-      // No bg color — use gradient search (fallback)
-      let bestGrad=0;
-      for(let dep=-5;dep<=5;dep++){
-        const px=ex+perpInX*dep,py=ey+perpInY*dep;
-        if(px<0||px>=w||py<0||py>=h)continue;
-        const g=Math.abs(lumAt(d,w,h,px-perpInX*2,py-perpInY*2)-lumAt(d,w,h,px+perpInX*2,py+perpInY*2));
-        if(g>bestGrad){bestGrad=g;trueEdgeX=px;trueEdgeY=py;}
-      }
+    // Gradient search ±5px around detected bound.
+    // This proved more reliable than bgColor walk-outward:
+    // the card-background gradient is sharp and well-localized,
+    // finds the true edge even when bounds are off by a few px.
+    let outerX=ex, outerY=ey, bestGrad=0;
+    for(let dep=-5;dep<=5;dep++){
+      const px=ex+perpInX*dep, py=ey+perpInY*dep;
+      if(px<0||px>=w||py<0||py>=h) continue;
+      const g=Math.abs(
+        lumAt(d,w,h,px-perpInX*2,py-perpInY*2)-
+        lumAt(d,w,h,px+perpInX*2,py+perpInY*2)
+      );
+      if(g>bestGrad){bestGrad=g; outerX=px; outerY=py;}
     }
+    edgePositions.push({x:outerX, y:outerY});
 
-    edgePositions.push({x:trueEdgeX,y:trueEdgeY});
-
-    // Sample border color from 2-5px inward from true card edge
+    // Sample border color from 2-5px inward from true card edge.
+    // 2-5px stays well inside the border but avoids the card edge artifact.
     for(let dep=2;dep<=5;dep++){
-      const px=CLAMP(Math.round(trueEdgeX+perpInX*dep),0,w-1);
-      const py=CLAMP(Math.round(trueEdgeY+perpInY*dep),0,h-1);
+      const px=CLAMP(Math.round(outerX+perpInX*dep),0,w-1);
+      const py=CLAMP(Math.round(outerY+perpInY*dep),0,h-1);
       const [r,g,b]=PX(d,w,px,py);
       borderColorSamples.push([r,g,b]);
     }
@@ -263,9 +239,12 @@ function measureBorderWidth(d, w, h, bn, side, angleDeg, bgColor) {
   const q1=measurements[Math.floor(measurements.length*0.25)];
   const q3=measurements[Math.floor(measurements.length*0.75)];
   const iqr=q3-q1;
+  // IQR thresholds: ≤8 = good, ≤20 = low, >20 = failed
+  // Card backs have "Pokémon" text right at border edge → IQR naturally up to 26
+  // That's still a usable measurement, not a failure
   return{
     width:med,
-    confidence:iqr<=5?'good':iqr<=12?'low':'failed',
+    confidence:iqr<=8?'good':iqr<=20?'low':'failed',
     iqr,
     borderColor:{r:Math.round(brR),g:Math.round(brG),b:Math.round(brB)},
     tol:Math.round(TOL),
