@@ -2,9 +2,17 @@
  * Vercel Serverless Proxy for CenteringCheck.com API
  */
 
-const https = require('https');
+import https from 'https';
 
-module.exports = async function handler(req, res) {
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '10mb',
+    },
+  },
+};
+
+export default async function handler(req, res) {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -30,7 +38,6 @@ module.exports = async function handler(req, res) {
 
     console.log('Proxying to CenteringCheck, image length:', image.length);
 
-    // Use https module instead of fetch for better Node.js compatibility
     const postData = JSON.stringify({ image, warp });
 
     const result = await new Promise((resolve, reject) => {
@@ -93,12 +100,4 @@ module.exports = async function handler(req, res) {
       message: error.message
     });
   }
-};
-
-module.exports.config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '10mb',
-    },
-  },
-};
+}
