@@ -22,6 +22,7 @@ const GRADES = [
 ];
 const getGrade = s => { for (const g of GRADES) if (s>=g.min&&s<=g.max) return g; return GRADES[GRADES.length-1]; };
 const mono="'JetBrains Mono','SF Mono',monospace", sans="'Inter',-apple-system,sans-serif";
+const PERFECT_CENTER = { lrRatio: 50, tbRatio: 50 }; // For "ignore centering" mode
 
 /* ═══════════════════════════════════════════
    IMAGE UTILITIES
@@ -1716,10 +1717,6 @@ export default function TAGPreGrader(){
   const[manualMode,setManualMode]=useState(null); // 'front'|'back'|null
   const[ignoreCentering,setIgnoreCentering]=useState(false); // Ignore centering in grade calculation
 
-  // Perfect centering for "ignore centering" mode
-  const perfectCenter = { lrRatio: 50, tbRatio: 50 };
-  const getEffectiveCentering = (actual) => ignoreCentering ? perfectCenter : actual;
-
   // Re-runs analysis with manual boundary overrides, updates grade
   const applyManualCorrection = useCallback(async (side, overrideBounds, overrideCentering) => {
     const src = side === 'front' ? fI : bI;
@@ -1728,8 +1725,8 @@ export default function TAGPreGrader(){
     const newFR = side === 'front' ? result : fR;
     const newBR = side === 'back' ? result : bR;
     if (side === 'front') setFR(result); else setBR(result);
-    const effFront = ignoreCentering ? perfectCenter : newFR.centering;
-    const effBack = ignoreCentering ? perfectCenter : newBR.centering;
+    const effFront = ignoreCentering ? PERFECT_CENTER : newFR.centering;
+    const effBack = ignoreCentering ? PERFECT_CENTER : newBR.centering;
     const grade = computeGrade(newFR.allDings, newBR.allDings, effFront, effBack);
     setGradeResult(grade);
   }, [fI, bI, fR, bR, ignoreCentering]);
@@ -1742,21 +1739,21 @@ export default function TAGPreGrader(){
       setProg("Detecting card bounds (back)...");await new Promise(r=>setTimeout(r,30));
       const br=await analyzeCardFull(bI,"back"); setBR(br);
       setProg("Computing DINGS-based grade...");await new Promise(r=>setTimeout(r,30));
-      const effFront = ignoreCentering ? perfectCenter : fr.centering;
-      const effBack = ignoreCentering ? perfectCenter : br.centering;
+      const effFront = ignoreCentering ? PERFECT_CENTER : fr.centering;
+      const effBack = ignoreCentering ? PERFECT_CENTER : br.centering;
       const grade=computeGrade(fr.allDings,br.allDings,effFront,effBack);
       setGradeResult(grade);
       setProg("Generating surface vision maps...");await new Promise(r=>setTimeout(r,30));
       setFM(await genMaps(fI)); setBM(await genMaps(bI));
       setStep(2);
-    }catch(e){console.error(e);setProg("Error — try better photos");}
+    }catch(e){console.error("Analysis error:",e);setProg(`Error: ${e.message || "try better photos"}`);}
   },[fI,bI,ignoreCentering]);
 
   // Recompute grade when ignoreCentering changes and results exist
   useEffect(()=>{
     if(fR && bR){
-      const effFront = ignoreCentering ? perfectCenter : fR.centering;
-      const effBack = ignoreCentering ? perfectCenter : bR.centering;
+      const effFront = ignoreCentering ? PERFECT_CENTER : fR.centering;
+      const effBack = ignoreCentering ? PERFECT_CENTER : bR.centering;
       const grade = computeGrade(fR.allDings, bR.allDings, effFront, effBack);
       setGradeResult(grade);
     }
