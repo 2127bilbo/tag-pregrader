@@ -374,34 +374,14 @@ function detectCornerDings(d, w, h, bn, side) {
     return { name, effectiveWear, avgSharp, isUniformBright, fray, fill, angle, cx, cy };
   });
 
-  // ── Pass 2: holo suppression ─────────────────────────────────────────────
-  // Corner detection does not work reliably on holo/foil cards.
-  // Three separate noise sources contaminate the white-pixel signal:
+  // ── Pass 2: holo adjustment ─────────────────────────────────────────────
+  // Holo/foil cards have additional noise sources:
   //   1. Foil glow — bright neutral pixels from reflective coating
   //   2. Card artwork — full-art cards have light-colored interior artwork
   //   3. Rounded corner stock — the physical card tip exposes white card-stock edge
-  // 13/14 foil cards in the training dataset produced false positive corners.
-  // Until a fundamentally different approach is available (e.g. multi-angle lighting),
-  // suppress corner DINGS on holo cards entirely.
-  // Non-holo cards (WOTC, standard bordered) are unaffected — detector works there.
-  if (isHolo) {
-    // Still populate details for display (shows W% values in Corners tab)
-    // but mark hasDing=false and return no corner DINGS
-    for (const c of cornerData) {
-      let fray=1000, fill=1000;
-      if(c.effectiveWear>0.30){fray-=20;fill-=25;}
-      else if(c.effectiveWear>0.15){fray-=10;fill-=12;}
-      else if(c.effectiveWear>0.05){fray-=3;fill-=5;}
-      details.push({
-        name:c.name, fray, fill,
-        angle: side==="front" ? 1000 : undefined,
-        whiteRatio: Math.round(c.effectiveWear*1000)/10,
-        sharpness: Math.round(c.avgSharp*10)/10,
-        hasDing: false, cropX:c.cx, cropY:c.cy, cropSize:cs,
-      });
-    }
-    return { dings:[], details };
-  }
+  // We use higher thresholds for holo cards (defined in Pass 3) rather than
+  // suppressing detection entirely, so corner/edge DINGS are still reported
+  // when damage is significant enough to exceed the holo-adjusted thresholds.
 
   // ── Pass 3: decide DING per corner and build output ─────────────────────
   for (const c of cornerData) {
@@ -1734,6 +1714,11 @@ export default function TAGPreGrader(){
   const[tab,setTab]=useState("overview"),[prog,setProg]=useState("");
   const[camTarget,setCamTarget]=useState(null);
   const[manualMode,setManualMode]=useState(null); // 'front'|'back'|null
+  const[ignoreCentering,setIgnoreCentering]=useState(false); // Ignore centering in grade calculation
+
+  // Perfect centering for "ignore centering" mode
+  const perfectCenter = { lrRatio: 50, tbRatio: 50 };
+  const getEffectiveCentering = (actual) => ignoreCentering ? perfectCenter : actual;
 
   // Re-runs analysis with manual boundary overrides, updates grade
   const applyManualCorrection = useCallback(async (side, overrideBounds, overrideCentering) => {
@@ -1743,9 +1728,11 @@ export default function TAGPreGrader(){
     const newFR = side === 'front' ? result : fR;
     const newBR = side === 'back' ? result : bR;
     if (side === 'front') setFR(result); else setBR(result);
-    const grade = computeGrade(newFR.allDings, newBR.allDings, newFR.centering, newBR.centering);
+    const effFront = ignoreCentering ? perfectCenter : newFR.centering;
+    const effBack = ignoreCentering ? perfectCenter : newBR.centering;
+    const grade = computeGrade(newFR.allDings, newBR.allDings, effFront, effBack);
     setGradeResult(grade);
-  }, [fI, bI, fR, bR]);
+  }, [fI, bI, fR, bR, ignoreCentering]);
 
   const run=useCallback(async()=>{
     if(!fI||!bI)return; setStep(1);
@@ -1755,15 +1742,27 @@ export default function TAGPreGrader(){
       setProg("Detecting card bounds (back)...");await new Promise(r=>setTimeout(r,30));
       const br=await analyzeCardFull(bI,"back"); setBR(br);
       setProg("Computing DINGS-based grade...");await new Promise(r=>setTimeout(r,30));
-      const grade=computeGrade(fr.allDings,br.allDings,fr.centering,br.centering);
+      const effFront = ignoreCentering ? perfectCenter : fr.centering;
+      const effBack = ignoreCentering ? perfectCenter : br.centering;
+      const grade=computeGrade(fr.allDings,br.allDings,effFront,effBack);
       setGradeResult(grade);
       setProg("Generating surface vision maps...");await new Promise(r=>setTimeout(r,30));
       setFM(await genMaps(fI)); setBM(await genMaps(bI));
       setStep(2);
     }catch(e){console.error(e);setProg("Error — try better photos");}
-  },[fI,bI]);
+  },[fI,bI,ignoreCentering]);
 
-  const reset=()=>{setStep(0);setFI(null);setBI(null);setFR(null);setBR(null);setFM(null);setBM(null);setGradeResult(null);setTab("overview");};
+  // Recompute grade when ignoreCentering changes and results exist
+  useEffect(()=>{
+    if(fR && bR){
+      const effFront = ignoreCentering ? perfectCenter : fR.centering;
+      const effBack = ignoreCentering ? perfectCenter : bR.centering;
+      const grade = computeGrade(fR.allDings, bR.allDings, effFront, effBack);
+      setGradeResult(grade);
+    }
+  },[ignoreCentering, fR, bR]);
+
+  const reset=()=>{setStep(0);setFI(null);setBI(null);setFR(null);setBR(null);setFM(null);setBM(null);setGradeResult(null);setTab("overview");setIgnoreCentering(false);};
   const handleCam=d=>{if(camTarget==="front")setFI(d);else setBI(d);setCamTarget(null);};
 
   const tabs=[
@@ -1943,7 +1942,31 @@ export default function TAGPreGrader(){
             <ManualBoundaryEditor image={bI} result={bR} side="Back"
               onApply={(bounds,centering)=>applyManualCorrection("back",bounds,centering)}/>
           )}
-          
+
+          {/* Ignore Centering Option */}
+          <div style={{marginBottom:14,padding:12,background:"#0d0f13",borderRadius:8,border:`1px solid ${ignoreCentering?"#ff994444":"#1a1c22"}`}}>
+            <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+              <input
+                type="checkbox"
+                checked={ignoreCentering}
+                onChange={e=>setIgnoreCentering(e.target.checked)}
+                style={{width:16,height:16,accentColor:"#ff9944",cursor:"pointer"}}
+              />
+              <span style={{fontFamily:mono,fontSize:11,color:ignoreCentering?"#ff9944":"#888",textTransform:"uppercase",letterSpacing:".04em"}}>
+                Ignore Centering in Grade
+              </span>
+            </label>
+            {ignoreCentering&&(
+              <div style={{marginTop:10,padding:10,background:"rgba(255,153,68,.08)",borderRadius:6,border:"1px solid rgba(255,153,68,.2)"}}>
+                <div style={{fontFamily:mono,fontSize:10,color:"#ff9944",fontWeight:600,marginBottom:4}}>⚠ WARNING</div>
+                <div style={{fontFamily:sans,fontSize:11,color:"#aa7744",lineHeight:1.4}}>
+                  Centering is set to 50/50 (perfect) and will NOT affect the grade.
+                  Use this when centering detection is unreliable or you want to grade based on condition only.
+                </div>
+              </div>
+            )}
+          </div>
+
           {[["Front",fR],["Back",bR]].map(([s,r])=>{
             const maxOff=Math.max(Math.max(r.centering.lrRatio,100-r.centering.lrRatio),Math.max(r.centering.tbRatio,100-r.centering.tbRatio));
             const hasDing=r.centerDings.length>0;
